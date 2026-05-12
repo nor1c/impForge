@@ -24,6 +24,7 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
         te_multipliers = []
         unet_multipliers = []
         dyn_dims = []
+        lbw_ratios = []
         for params in params_list:
             assert params.items
 
@@ -38,11 +39,21 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             dyn_dim = int(params.positional[3]) if len(params.positional) > 3 else None
             dyn_dim = int(params.named["dyn"]) if "dyn" in params.named else dyn_dim
 
+            # Block-weight / role spec. `lbw=` accepts a preset name, a role
+            # alias, or a 12-value comma list. `role=` / `type=` accept only
+            # role aliases. `lbw=` wins if both are present. Passed through as
+            # a string; networks.load_networks resolves it into a 12-tuple.
+            lbw_spec = params.named.get("lbw") or params.named.get("w")
+            if lbw_spec is None:
+                role_spec = params.named.get("role") or params.named.get("type")
+                lbw_spec = role_spec  # may still be None -> path-based fallback
+
             te_multipliers.append(te_multiplier)
             unet_multipliers.append(unet_multiplier)
             dyn_dims.append(dyn_dim)
+            lbw_ratios.append(lbw_spec)
 
-        networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims)
+        networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims, lbw_ratios=lbw_ratios)
 
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):

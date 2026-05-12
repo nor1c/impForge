@@ -7,6 +7,7 @@ import re
 import lora_patches
 import functools
 import network
+import lbw_engine
 
 import torch
 from typing import Union
@@ -48,7 +49,7 @@ def purge_networks_from_memory():
     pass
 
 
-def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None):
+def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, lbw_ratios=None):
     global lora_state_dict_cache
 
     current_sd = sd_models.model_data.get_sd_model()
@@ -70,11 +71,32 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         list_available_networks()
         networks_on_disk = [available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None) for name in names]
 
+    # Resolve per-LoRA block-weight ratios. `lbw_ratios` is a list aligned with
+    # `names`, where each entry is either a 12-tuple of floats, a preset/role
+    # string, or None. If None, we fall back to path-based auto-routing.
+    if lbw_ratios is None:
+        lbw_ratios = [None] * len(names)
+    resolved_ratios = []
+    for i, raw in enumerate(lbw_ratios):
+        ratios = None
+        if raw is not None:
+            if isinstance(raw, (tuple, list)) and len(raw) in (12, 13):
+                ratios = tuple(float(x) for x in raw)
+                if len(ratios) == 12:
+                    # Expand to 13 by copying BASE into BASE_LATE slot.
+                    ratios = ratios + (ratios[0],)
+            elif isinstance(raw, str):
+                ratios = lbw_engine.parse_lbw_spec(raw)
+        if ratios is None and networks_on_disk[i] is not None:
+            ratios = lbw_engine.infer_ratios_from_path(networks_on_disk[i].filename)
+        resolved_ratios.append(ratios)
+
     compiled_lora_targets = []
     all_networks_found = True
-    for a, b, c in zip(networks_on_disk, unet_multipliers, te_multipliers):
+    for a, b, c, r in zip(networks_on_disk, unet_multipliers, te_multipliers, resolved_ratios):
         if a is not None:
-            compiled_lora_targets.append([a.filename, b, c])
+            # Include ratios in the cache key so changing lbw/role invalidates cache.
+            compiled_lora_targets.append([a.filename, b, c, r])
         else:
             all_networks_found = False
 
@@ -99,11 +121,34 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
     current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
 
-    for filename, strength_model, strength_clip in compiled_lora_targets:
+    for target in compiled_lora_targets:
+        filename, strength_model, strength_clip, ratios = target
         lora_sd = load_lora_state_dict(filename)
+
+        # Snapshot the patch dicts BEFORE applying this LoRA, so we can
+        # identify exactly which entries this LoRA added and scale only those.
+        before_unet = lbw_engine.snapshot_patches(current_sd.forge_objects.unet.patches) if current_sd.forge_objects.unet is not None else {}
+        before_clip = {}
+        if current_sd.forge_objects.clip is not None:
+            clip_patches = getattr(current_sd.forge_objects.clip, "patches", None)
+            if clip_patches is None and hasattr(current_sd.forge_objects.clip, "patcher"):
+                clip_patches = getattr(current_sd.forge_objects.clip.patcher, "patches", None)
+            if clip_patches is not None:
+                before_clip = lbw_engine.snapshot_patches(clip_patches)
+
         current_sd.forge_objects.unet, current_sd.forge_objects.clip = load_lora_for_models(
             current_sd.forge_objects.unet, current_sd.forge_objects.clip, lora_sd, strength_model, strength_clip,
             filename=filename)
+
+        # Apply block weights ONLY to the patches this LoRA just added.
+        # Per-LoRA snapshot-diff makes cross-LoRA misalignment impossible.
+        if ratios is not None:
+            lbw_engine.apply_block_weights(
+                current_sd.forge_objects.unet,
+                current_sd.forge_objects.clip,
+                before_unet, before_clip,
+                ratios, lora_name=filename,
+            )
 
     current_sd.forge_objects_after_applying_lora = current_sd.forge_objects.shallow_copy()
     return
