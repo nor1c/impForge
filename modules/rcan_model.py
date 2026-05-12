@@ -1,0 +1,68 @@
+import os
+import re
+from functools import lru_cache
+from modules import modelloader, devices, errors
+from modules.shared import opts, cmd_opts, models_path
+from modules.upscaler import Upscaler, UpscalerData
+from modules.upscaler_utils import upscale_with_model
+from modules_forge.forge_util import prepare_free_memory
+
+PREFER_HALF = opts.prefer_fp16_upscalers
+if PREFER_HALF:
+    print("[Upscalers] Prefer Half-Precision:", PREFER_HALF)
+
+
+class UpscalerRCAN(Upscaler):
+    def __init__(self, dirname=None):
+        self.name = "RCAN"
+        self.model_path = os.path.join(models_path, "RCAN")
+        self.model_name = "RCAN"
+        self.model_url = None
+        self.scalers = []
+        self.user_path = dirname
+        super().__init__(create_dirs=True)
+
+        for file in self.find_models(ext_filter=[".pt", ".pth", ".safetensors"]):
+            if file.startswith("http"):
+                name = self.model_name
+            else:
+                name = modelloader.friendly_name(file)
+
+            if match := re.search(r"(\d)[xX]|[xX](\d)", name):
+                scale = int(match.group(1) or match.group(2))
+            else:
+                scale = 4
+
+            scaler_data = UpscalerData(name, file, self, scale)
+            self.scalers.append(scaler_data)
+
+    def do_upscale(self, img, selected_model):
+        prepare_free_memory()
+        try:
+            model = self.load_model(selected_model)
+        except Exception:
+            errors.report(f"Unable to load RCAN model {selected_model}", exc_info=True)
+            return img
+        model.to(devices.device_esrgan)
+        return upscale_with_model(
+            model=model,
+            img=img,
+            tile_size=opts.RCAN_tile,
+            tile_overlap=opts.RCAN_tile_overlap,
+        )
+
+    @lru_cache(maxsize=4)
+    def load_model(self, path: str):
+        if not path.startswith("http"):
+            filename = path
+        else:
+            filename = modelloader.load_file_from_url(
+                url=path,
+                model_dir=self.model_download_path,
+                file_name=path.rsplit("/", 1)[-1],
+            )
+
+        model = modelloader.load_spandrel_model(filename, device=devices.cpu, prefer_half=PREFER_HALF)
+        model.to(devices.device_esrgan)
+        return model
+    
