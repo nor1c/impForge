@@ -981,7 +981,14 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     if isinstance(seed, list):
         p.all_seeds = seed
     else:
-        p.all_seeds = [int(seed) + (x if p.subseed_strength == 0 else 0) for x in range(len(p.all_prompts))]
+        if p.subseed_strength != 0:
+            # subseed variation mode: all images use the same base seed
+            p.all_seeds = [int(seed)] * len(p.all_prompts)
+        else:
+            # first image uses the requested seed; remaining images get fully
+            # independent random seeds instead of the old seed+1, seed+2, ...
+            # pattern which produced visually similar results across a batch.
+            p.all_seeds = [int(seed)] + [int(random.randrange(4294967294)) for _ in range(len(p.all_prompts) - 1)]
 
     if isinstance(subseed, list):
         p.all_subseeds = subseed
