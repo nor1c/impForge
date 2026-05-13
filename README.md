@@ -2,6 +2,8 @@ Improved reForge is aimed at enhancing performance and optimization. Feel free t
 
 There are also some minor config adjustments to improve generation speed, while still staying within a safe range without reducing image quality.
 
-Local setup notes:
 
-- [SageAttention and FlashAttention setup](docs/sage_flash_attention_setup.md)
+- Added Sage Attention and Flash Attention.
+  It's not really a big performance gain, but there is a noticeable speed improvement, around 0.7-0.8 it/s.
+  [SageAttention and FlashAttention setup](docs/sage_flash_attention_setup.md)
+  Refer: [https://github.com/lllyasviel/stable-diffusion-webui-forge/issues/2866](https://github.com/lllyasviel/stable-diffusion-webui-forge/issues/2866)
