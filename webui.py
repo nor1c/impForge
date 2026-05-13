@@ -122,7 +122,7 @@ def webui_worker():
             ssl_verify=cmd_opts.disable_tls_verify,
             debug=cmd_opts.gradio_debug,
             auth=gradio_auth_creds,
-            inbrowser=auto_launch_browser,
+            inbrowser=False,  # we open the browser manually below to append ?__theme=dark
             prevent_thread_lock=True,
             allowed_paths=cmd_opts.gradio_allowed_path,
             app_kwargs={
@@ -133,6 +133,16 @@ def webui_worker():
         )
 
         startup_timer.record("gradio launch")
+
+        if auto_launch_browser:
+            import webbrowser
+            # Use local_url when available, fall back to share_url for remote launches.
+            # Append ?__theme=dark so the browser always opens in dark mode.
+            launch_url = local_url or share_url or ""
+            if launch_url:
+                # Strip trailing slash before appending query string
+                launch_url = launch_url.rstrip("/")
+                webbrowser.open(f"{launch_url}?__theme=dark")
 
         # gradio uses a very open CORS policy via app.user_middleware, which makes it possible for
         # an attacker to trick the user into opening a malicious HTML page, which makes a request to the
