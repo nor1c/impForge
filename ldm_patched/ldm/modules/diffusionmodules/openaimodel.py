@@ -891,10 +891,15 @@ class UNetModel(nn.Module):
             emb = emb + self.label_emb(y)
 
         h = x
+        # Perf (A3): inline the control-None fast-path. apply_control() is
+        # called 19+ times per UNet forward; for generations without ControlNet
+        # (the common case) this skips a Python function call every time.
+        _has_control = control is not None
         for id, module in enumerate(self.input_blocks):
             transformer_options["block"] = ("input", id)
             h = forward_timestep_embed(module, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-            h = apply_control(h, control, 'input')
+            if _has_control:
+                h = apply_control(h, control, 'input')
             if "input_block_patch" in transformer_patches:
                 patch = transformer_patches["input_block_patch"]
                 for p in patch:
@@ -909,13 +914,15 @@ class UNetModel(nn.Module):
         transformer_options["block"] = ("middle", 0)
         if self.middle_block is not None:
             h = forward_timestep_embed(self.middle_block, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-        h = apply_control(h, control, 'middle')
+        if _has_control:
+            h = apply_control(h, control, 'middle')
 
 
         for id, module in enumerate(self.output_blocks):
             transformer_options["block"] = ("output", id)
             hsp = hs.pop()
-            hsp = apply_control(hsp, control, 'output')
+            if _has_control:
+                hsp = apply_control(hsp, control, 'output')
 
             if "output_block_patch" in transformer_patches:
                 patch = transformer_patches["output_block_patch"]

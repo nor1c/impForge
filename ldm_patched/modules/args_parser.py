@@ -102,6 +102,12 @@ parser.add_argument("--torch-compile-cudagraphs", action='store_true', help="Ena
 parser.add_argument("--torch-compile-trace", action='store_true', help="Enable tracing")
 parser.add_argument("--torch-compile-graph-diagram", action='store_true', help="Enable graph diagram")
 
+# Native CUDA graph capture for the UNet forward. Much simpler than torch.compile
+# (no Triton/MSVC dependencies) — uses torch.cuda.graph() directly to record a
+# replayable graph on the first step of each sampling run. Falls back to eager
+# automatically when anything goes wrong.
+parser.add_argument("--unet-cuda-graph", action='store_true', help="Capture the UNet forward as a CUDA graph for faster replay on subsequent denoising steps. Falls back to eager if capture fails.")
+
 
 parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")
 

@@ -133,10 +133,25 @@ class BaseModel(torch.nn.Module):
             else:
                 operations = model_config.custom_operations
             self.diffusion_model = unet_model(**unet_config, device=device, operations=operations)
-            if ldm_patched.modules.model_management.force_channels_last():
+            # Perf: cache channels-last decision once. force_channels_last()
+            # reads args.force_channels_last via argparse Namespace every
+            # call; this is invariant after startup.
+            self._channels_last = ldm_patched.modules.model_management.force_channels_last()
+            if self._channels_last:
                 self.diffusion_model.to(memory_format=torch.channels_last)
                 logging.debug("using channels last mode for diffusion model")
             logging.info("model weight dtype {}, manual cast: {}".format(self.get_dtype(), self.manual_cast_dtype))
+
+            # Perf (B1): optional CUDA graph capture of the UNet forward.
+            # Opt-in via --unet-cuda-graph; no-op otherwise. Wraps after
+            # channels-last is applied so the captured graph uses the right layout.
+            try:
+                from ldm_patched.modules.cuda_graph_unet import wrap_if_enabled
+                self.diffusion_model = wrap_if_enabled(self.diffusion_model)
+            except Exception as _e:
+                logging.warning(f"UNet CUDA graph wrap failed: {_e}")
+        else:
+            self._channels_last = ldm_patched.modules.model_management.force_channels_last()
         self.model_type = model_type
         self.model_sampling = model_sampling(model_config, model_type)
 
@@ -169,12 +184,16 @@ class BaseModel(torch.nn.Module):
         if self.manual_cast_dtype is not None:
             dtype = self.manual_cast_dtype
 
-        if ldm_patched.modules.model_management.force_channels_last() and xc.ndim == 4:
-            xc = xc.to(dtype=dtype, memory_format=torch.channels_last)
+        # Perf (A1): use cached _channels_last; avoids args-namespace lookup per step.
+        # Perf (A5): skip .to() when tensor is already in the target dtype/layout.
+        if self._channels_last and xc.ndim == 4:
+            if xc.dtype != dtype or not xc.is_contiguous(memory_format=torch.channels_last):
+                xc = xc.to(dtype=dtype, memory_format=torch.channels_last)
         else:
-            xc = xc.to(dtype)
+            if xc.dtype != dtype:
+                xc = xc.to(dtype)
         t = self.model_sampling.timestep(t).float()
-        if context is not None:
+        if context is not None and context.dtype != dtype:
             context = context.to(dtype)
 
         extra_conds = {}

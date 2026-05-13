@@ -325,7 +325,13 @@ def _calc_cond_batch(model: 'BaseModel', conds: list[list[dict]], x_in: torch.Te
             batch_chunks = len(cond_or_uncond)
             input_x = torch.cat(input_x)
             c = cond_cat(c)
-            timestep_ = torch.cat([timestep] * batch_chunks)
+            # Perf (A4): skip the timestep cat when only one chunk (uncond
+            # skipped via cfg=1.0 optimization). The cat allocates a copy
+            # for no reason in that case.
+            if batch_chunks == 1:
+                timestep_ = timestep
+            else:
+                timestep_ = torch.cat([timestep] * batch_chunks)
 
             transformer_options = {} 
             if hasattr(model, 'current_patcher') and model.current_patcher is not None:

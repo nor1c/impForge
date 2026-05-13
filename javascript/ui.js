@@ -118,15 +118,42 @@ function get_img2img_tab_index() {
     return res;
 }
 
-function create_submit_args(args) {
+function create_submit_args(args, numOutputs) {
     var res = Array.from(args);
 
-    // As it is currently, txt2img and img2img send back the previous output args (txt2img_gallery, generation_info, html_info) whenever you generate a new image.
-    // This can lead to uploading a huge gallery of previously generated images, which leads to an unnecessary delay between submitting and beginning to generate.
-    // I don't know why gradio is sending outputs along with inputs, but we can prevent sending the image gallery here, which seems to be an issue for some.
-    // If gradio at some point stops sending outputs, this may break something
-    if (Array.isArray(res[res.length - 3])) {
-        res[res.length - 3] = null;
+    // Gradio sends the previous output values back to the server appended to the
+    // inputs on every submit. For txt2img/img2img this includes the image gallery
+    // (a JS Array of image objects), which after a batch generation can be tens
+    // to hundreds of kilobytes. Serializing + POSTing that gallery is the cause
+    // of the noticeable delay between clicking Generate and the generation
+    // actually starting on the 2nd and subsequent runs — there's nothing to send
+    // on the 1st click because the gallery is empty.
+    //
+    // numOutputs is the number of outputs declared in the Gradio event binding.
+    // Gallery is always the first output, so it lives at res.length - numOutputs.
+    // We also null any other output at that tail slice to skip re-uploading
+    // generation_info / infotext / html_log strings (small, but still pointless).
+    // Pass 0 to skip the stripping entirely (e.g. for modelmerger).
+    //
+    // The old code assumed 3 outputs (hardcoded res.length - 3). That was correct
+    // for the extras tab (3 outputs) but broken for txt2img/img2img which now
+    // have 4 outputs ([gallery, generation_info, infotext, html_log]) — the
+    // gallery actually sits at res.length - 4 there, and the old check was a
+    // no-op because res[res.length - 3] is a string (generation_info), not an
+    // Array, so Array.isArray() returned false.
+
+    if (typeof numOutputs !== 'number' || numOutputs <= 0) {
+        return res;
+    }
+
+    var startIdx = Math.max(0, res.length - numOutputs);
+    for (var i = startIdx; i < res.length; i++) {
+        var v = res[i];
+        // Only null arrays (galleries) and strings (infotext/html_log/generation_info).
+        // Leave objects alone in case extensions bind non-standard output types.
+        if (Array.isArray(v) || typeof v === 'string') {
+            res[i] = null;
+        }
     }
 
     return res;
@@ -164,7 +191,8 @@ function submit() {
         showRestoreProgressButton('txt2img', false);
     });
 
-    var res = create_submit_args(arguments);
+    // txt2img has 4 outputs: [gallery, generation_info, infotext, html_log]
+    var res = create_submit_args(arguments, 4);
 
     res[0] = id;
 
@@ -191,7 +219,8 @@ function submit_img2img() {
         showRestoreProgressButton('img2img', false);
     });
 
-    var res = create_submit_args(arguments);
+    // img2img has 4 outputs: [gallery, generation_info, infotext, html_log]
+    var res = create_submit_args(arguments, 4);
 
     res[0] = id;
     res[1] = get_tab_index('mode_img2img');
@@ -208,7 +237,8 @@ function submit_extras() {
         showSubmitButtons('extras', true);
     });
 
-    var res = create_submit_args(arguments);
+    // extras has 3 outputs: [gallery, generation_info, html_log]
+    var res = create_submit_args(arguments, 3);
 
     res[0] = id;
 
@@ -280,7 +310,10 @@ function modelmerger() {
     var id = randomId();
     requestProgress(id, gradioApp().getElementById('modelmerger_results_panel'), null, function() {});
 
-    var res = create_submit_args(arguments);
+    // modelmerger outputs are all dropdowns/textboxes (strings), not galleries.
+    // Pass 0 so create_submit_args leaves outputs untouched — there's no gallery
+    // to strip and these strings are tiny.
+    var res = create_submit_args(arguments, 0);
     res[0] = id;
     return res;
 }
