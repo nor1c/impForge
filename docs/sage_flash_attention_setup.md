@@ -8,11 +8,13 @@ The WebUI launch flag is `--use-sage-attention`.
 
 At runtime, `ldm_patched/ldm/modules/attention.py` uses selective routing:
 
-- SageAttention is used for large supported self-attention calls.
+- Generic SageAttention is used for large supported self-attention calls.
 - FlashAttention is used as an internal fallback for large unsupported self-attention head dimensions.
 - PyTorch SDPA is kept for cross-attention, small attention calls, masked attention, CPU tensors, unsupported dtypes, and error fallback.
 
 This is intentional. Benchmarks on the RTX 5070 Ti showed Sage/Flash are faster for large self-attention, but PyTorch SDPA is faster for short cross-attention against text tokens.
+
+Do not enable `sageattn_qk_int8_pv_fp16_cuda` from the current Windows wheel on this setup. It can trigger asynchronous CUDA failures such as `no kernel image is available for execution on the device` and crash Python from native code, so it is not safe as a runtime fallback.
 
 ## Current Launch Flags
 
@@ -200,5 +202,6 @@ Expected summary:
 
 - The goal is lower real generation time, not maximum SageAttention call count.
 - Cross-attention often stays on SDPA because text-token attention is short and SDPA benchmarks faster there.
+- The lower-level SageAttention fp16 CUDA kernel is intentionally not used on this setup because the current wheel can crash the process from native CUDA code.
 - Wheel compatibility is strict. Match CUDA, Torch, Python, and platform tags.
 - For this repo, focus on SDXL/IllustriousXL. Do not spend time scanning checkpoint or LoRA model files when maintaining this setup.
