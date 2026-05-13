@@ -4,7 +4,24 @@ set PYTHON=
 set GIT=
 set VENV_DIR=
 
-set COMMANDLINE_ARGS=--unet-cuda-graph --skip-version-check --skip-python-version-check --skip-torch-cuda-test --always-gpu --force-channels-last --allow-fp16-accumulation --pin-shared-memory --cuda-malloc --cuda-stream --fast fp16_accumulation --vae-in-bf16 --port 44444 --ckpt-dir "F:\AI\MODELS\CKPT" --lora-dir "F:\AI\MODELS\Lora" --embeddings-dir "D:\AI\MODELS\embeddings" --vae-dir "D:\AI\MODELS\VAE"
+set COMMANDLINE_ARGS=^
+  --skip-version-check ^
+  --skip-python-version-check ^
+  --skip-torch-cuda-test ^
+  --pin-shared-memory ^
+  --cuda-malloc ^
+  --cuda-stream ^
+  --always-gpu ^
+  --force-channels-last ^
+  --fast fp16_accumulation ^
+  --vae-in-bf16 ^
+  --no-hashing ^
+  --use-sage-attention ^
+  --port 44444 ^
+  --ckpt-dir "F:\AI\MODELS\CKPT" ^
+  --lora-dir "F:\AI\MODELS\Lora" ^
+  --embeddings-dir "D:\AI\MODELS\embeddings" ^
+  --vae-dir "D:\AI\MODELS\VAE"
 
 @REM Uncomment following code to reference an existing A1111 checkout.
 @REM set A1111_HOME=Your A1111 checkout dir

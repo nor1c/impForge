@@ -302,17 +302,40 @@ class CSVLogger:
 @contextmanager
 def tf32_mode(cudnn=None, matmul=None):
     """A context manager that sets whether TF32 is allowed on cuDNN or matmul."""
-    cudnn_old = torch.backends.cudnn.allow_tf32
-    matmul_old = torch.backends.cuda.matmul.allow_tf32
+    # Prefer the new fp32_precision API on PyTorch >= 2.9, fall back to the
+    # legacy allow_tf32 API on older versions. This silences deprecation warnings.
+    use_new_api = hasattr(torch.backends.cudnn, 'conv') and hasattr(torch.backends.cudnn.conv, 'fp32_precision')
+
+    def _to_precision(enabled):
+        return "tf32" if enabled else "ieee"
+
+    if use_new_api:
+        cudnn_old = torch.backends.cudnn.conv.fp32_precision
+        matmul_old = torch.backends.cuda.matmul.fp32_precision
+    else:
+        cudnn_old = torch.backends.cudnn.allow_tf32
+        matmul_old = torch.backends.cuda.matmul.allow_tf32
     try:
         if cudnn is not None:
-            torch.backends.cudnn.allow_tf32 = cudnn
+            if use_new_api:
+                torch.backends.cudnn.conv.fp32_precision = _to_precision(cudnn)
+            else:
+                torch.backends.cudnn.allow_tf32 = cudnn
         if matmul is not None:
-            torch.backends.cuda.matmul.allow_tf32 = matmul
+            if use_new_api:
+                torch.backends.cuda.matmul.fp32_precision = _to_precision(matmul)
+            else:
+                torch.backends.cuda.matmul.allow_tf32 = matmul
         yield
     finally:
         if cudnn is not None:
-            torch.backends.cudnn.allow_tf32 = cudnn_old
+            if use_new_api:
+                torch.backends.cudnn.conv.fp32_precision = cudnn_old
+            else:
+                torch.backends.cudnn.allow_tf32 = cudnn_old
         if matmul is not None:
-            torch.backends.cuda.matmul.allow_tf32 = matmul_old
+            if use_new_api:
+                torch.backends.cuda.matmul.fp32_precision = matmul_old
+            else:
+                torch.backends.cuda.matmul.allow_tf32 = matmul_old
             

@@ -651,19 +651,25 @@ def force_memory_deallocation():
     
     # Track large objects for collection - FIXED: Added try-except to handle garbage collected objects
     large_objects = []
-    for obj in gc.get_objects():
-        try:
-            # Check if object is still valid before accessing its properties
-            if (isinstance(obj, torch.Tensor) and 
-                hasattr(obj, 'is_cuda') and not obj.is_cuda and 
-                hasattr(obj, 'numel') and obj.numel() > 1e6):
-                large_objects.append(obj)
-        except ReferenceError:
-            # Object was garbage collected during iteration, skip it
-            continue
-        except Exception:
-            # Any other exception, just skip this object
-            continue
+    # Suppress the deprecated `torch.distributed.reduce_op` FutureWarning that
+    # gets triggered when iterating over gc.get_objects() touches stale torch
+    # aliases. Doesn't affect behavior.
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning, module="torch.distributed")
+        for obj in gc.get_objects():
+            try:
+                # Check if object is still valid before accessing its properties
+                if (isinstance(obj, torch.Tensor) and 
+                    hasattr(obj, 'is_cuda') and not obj.is_cuda and 
+                    hasattr(obj, 'numel') and obj.numel() > 1e6):
+                    large_objects.append(obj)
+            except ReferenceError:
+                # Object was garbage collected during iteration, skip it
+                continue
+            except Exception:
+                # Any other exception, just skip this object
+                continue
     
     for obj in large_objects:
         try:

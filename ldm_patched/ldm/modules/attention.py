@@ -13,6 +13,16 @@ from .diffusionmodules.util import AlphaBlender, timestep_embedding
 from .sub_quadratic_attention import efficient_dot_product_attention
 
 from ldm_patched.modules import model_management
+from ldm_patched.modules.args_parser import args
+
+SAGE_ATTENTION_HEAD_DIMS = {64, 96, 128}
+FLASH_ATTENTION_MAX_HEAD_DIM = 256
+SAGE_ATTENTION_MIN_SELF_TOKENS = 2048
+FLASH_ATTENTION_MIN_SELF_TOKENS = 1024
+SAGE_ATTN_AVAILABLE = False
+FLASH_ATTN_AVAILABLE = False
+sageattn = None
+flash_attn_func = None
 
 if model_management.xformers_enabled():
     import xformers
@@ -20,7 +30,9 @@ if model_management.xformers_enabled():
 
 if model_management.sage_attention_enabled():
     try:
-        from sageattention import sageattn
+        from sageattention import sageattn as _sageattn
+        sageattn = _sageattn
+        SAGE_ATTN_AVAILABLE = True
         print("Found SageAttention 1.x/2.x (sageattention package)")
     except ModuleNotFoundError as e:
         if e.name == "sageattention":
@@ -40,14 +52,24 @@ if model_management.sage_attention3_enabled():
             raise e
         exit(-1)
 
-if model_management.flash_attention_enabled():
+if model_management.flash_attention_enabled() or model_management.sage_attention_enabled():
     try:
-        from flash_attn import flash_attn_func
-    except ModuleNotFoundError:
-        logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
-        exit(-1)
+        from flash_attn import flash_attn_func as _flash_attn_func
+        flash_attn_func = _flash_attn_func
+        FLASH_ATTN_AVAILABLE = True
+        if model_management.sage_attention_enabled():
+            print("Found FlashAttention (flash_attn package) - will be used as SageAttention fallback when needed")
+        else:
+            print("Found FlashAttention (flash_attn package)")
+    except ModuleNotFoundError as e:
+        if model_management.flash_attention_enabled():
+            if e.name == "flash_attn":
+                logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
+            else:
+                raise e
+            exit(-1)
+        print("FlashAttention not found; SageAttention unsupported shapes will use pytorch SDPA fallback")
 
-from ldm_patched.modules.args_parser import args
 import ldm_patched.modules.ops
 ops = ldm_patched.modules.ops.disable_weight_init
 
@@ -522,7 +544,100 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
     return out
 
 
+_ATTENTION_COUNTERS = {
+    "sage": 0,
+    "flash": 0,
+    "sdpa": 0,
+    "sage_error": 0,
+    "flash_error": 0,
+}
+_ATTENTION_FALLBACK_REASONS = {}
+
+
+def _count_attention(key):
+    _ATTENTION_COUNTERS[key] = _ATTENTION_COUNTERS.get(key, 0) + 1
+
+
+def _count_attention_reason(reason):
+    _ATTENTION_FALLBACK_REASONS[reason] = _ATTENTION_FALLBACK_REASONS.get(reason, 0) + 1
+
+
+def _attention_head_dim(q, heads, skip_reshape):
+    return q.shape[-1] if skip_reshape else q.shape[-1] // heads
+
+
+def _attention_token_lengths(q, k, skip_reshape):
+    token_dim = -2 if skip_reshape else 1
+    return q.shape[token_dim], k.shape[token_dim]
+
+
+def _attention_can_use_flash(q, k, v, head_dim, mask, skip_reshape):
+    if not FLASH_ATTN_AVAILABLE:
+        return False, "flash_unavailable"
+    if not (q.is_cuda and k.is_cuda and v.is_cuda):
+        return False, "flash_non_cuda"
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        return False, f"flash_dtype_{q.dtype}"
+    if mask is not None:
+        return False, "flash_mask"
+    if head_dim > FLASH_ATTENTION_MAX_HEAD_DIM or head_dim % 8 != 0:
+        return False, f"flash_head_dim_{head_dim}"
+    q_tokens, k_tokens = _attention_token_lengths(q, k, skip_reshape)
+    if q_tokens != k_tokens:
+        return False, "flash_cross_attention"
+    if q_tokens < FLASH_ATTENTION_MIN_SELF_TOKENS:
+        return False, f"flash_tokens_{q_tokens}"
+    return True, None
+
+
+def _attention_can_use_sage(q, k, v, head_dim, mask, skip_reshape):
+    if not SAGE_ATTN_AVAILABLE:
+        return False, "sage_unavailable"
+    if not (q.is_cuda and k.is_cuda and v.is_cuda):
+        return False, "sage_non_cuda"
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        return False, f"sage_dtype_{q.dtype}"
+    if mask is not None:
+        return False, "sage_mask"
+    if head_dim not in SAGE_ATTENTION_HEAD_DIMS:
+        return False, f"sage_head_dim_{head_dim}"
+    q_tokens, k_tokens = _attention_token_lengths(q, k, skip_reshape)
+    if q_tokens != k_tokens:
+        return False, "sage_cross_attention"
+    if q_tokens < SAGE_ATTENTION_MIN_SELF_TOKENS:
+        return False, f"sage_tokens_{q_tokens}"
+    return True, None
+
+
+def _attention_to_explicit_cuda_device(q, k, v):
+    if q.is_cuda and q.device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+        return q.to(device), k.to(device), v.to(device)
+    return q, k, v
+
+
+def _attention_fallback(q, k, v, heads, mask, attn_precision, skip_reshape, skip_output_reshape, reason):
+    _count_attention_reason(reason)
+    head_dim = _attention_head_dim(q, heads, skip_reshape)
+    if reason.startswith("sage_head_dim_"):
+        can_flash, flash_reason = _attention_can_use_flash(q, k, v, head_dim, mask, skip_reshape)
+        if can_flash:
+            return attention_flash(q, k, v, heads, mask=mask, attn_precision=attn_precision,
+                                   skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape)
+        _count_attention_reason(flash_reason)
+    _count_attention("sdpa")
+    return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision,
+                             skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape)
+
+
 def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
+    head_dim = _attention_head_dim(q, heads, skip_reshape)
+    can_sage, reason = _attention_can_use_sage(q, k, v, head_dim, mask, skip_reshape)
+    if not can_sage:
+        return _attention_fallback(q, k, v, heads, mask, attn_precision, skip_reshape, skip_output_reshape, reason)
+
+    q, k, v = _attention_to_explicit_cuda_device(q, k, v)
+
     if skip_reshape:
         b, _, _, dim_head = q.shape
         tensor_layout = "HND"
@@ -535,35 +650,49 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
         )
         tensor_layout = "NHD"
 
-    if mask is not None:
-        # add a batch dimension if there isn't already one
-        if mask.ndim == 2:
-            mask = mask.unsqueeze(0)
-        # add a heads dimension if there isn't already one
-        if mask.ndim == 3:
-            mask = mask.unsqueeze(1)
-
     try:
-        out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout)
+        out = sageattn(q, k, v, is_causal=False, tensor_layout=tensor_layout)
+        _count_attention("sage")
     except Exception as e:
-        logging.error("Error running sage attention: {}, using pytorch attention instead.".format(e))
+        logging.warning("SageAttention failed, using pytorch SDPA: {}".format(e))
+        _count_attention("sage_error")
+        _count_attention("sdpa")
         if tensor_layout == "NHD":
             q, k, v = map(
                 lambda t: t.transpose(1, 2),
                 (q, k, v),
             )
-        return attention_pytorch(q, k, v, heads, mask=mask, skip_reshape=True, skip_output_reshape=skip_output_reshape)
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision,
+                                 skip_reshape=True, skip_output_reshape=skip_output_reshape)
     if tensor_layout == "HND":
         if not skip_output_reshape:
-            out = (
-                out.transpose(1, 2).reshape(b, -1, heads * dim_head)
-            )
+            out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
     else:
         if skip_output_reshape:
             out = out.transpose(1, 2)
         else:
             out = out.reshape(b, -1, heads * dim_head)
     return out
+
+
+def reset_attention_counters():
+    """Reset attention backend counters. Call at the start of generation."""
+    for key in list(_ATTENTION_COUNTERS):
+        _ATTENTION_COUNTERS[key] = 0
+    _ATTENTION_FALLBACK_REASONS.clear()
+
+
+def print_attention_counters():
+    """Print a summary of attention backends used during generation."""
+    total = _ATTENTION_COUNTERS.get("sage", 0) + _ATTENTION_COUNTERS.get("flash", 0) + _ATTENTION_COUNTERS.get("sdpa", 0)
+    if total == 0:
+        return
+    parts = [f"{key}={value}" for key, value in _ATTENTION_COUNTERS.items() if value]
+    print(f"[Attention backends] {' | '.join(parts)} | total={total}")
+    if _ATTENTION_FALLBACK_REASONS:
+        reasons = sorted(_ATTENTION_FALLBACK_REASONS.items(), key=lambda item: item[1], reverse=True)
+        reason_text = " | ".join(f"{key}={value}" for key, value in reasons[:8])
+        print(f"[Attention fallbacks] {reason_text}")
 
 
 def attention_sage3(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
@@ -625,26 +754,41 @@ def attention_sage3(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         return attention_pytorch(q, k, v, heads, mask=mask, skip_reshape=True, skip_output_reshape=skip_output_reshape)
     return out
 
-try:
-    @torch.library.custom_op("flash_attention::flash_attn", mutates_args=())
+if FLASH_ATTN_AVAILABLE:
+    try:
+        @torch.library.custom_op("flash_attention::flash_attn", mutates_args=())
+        def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                        dropout_p: float = 0.0, causal: bool = False) -> torch.Tensor:
+            return flash_attn_func(q, k, v, dropout_p=dropout_p, causal=causal)
+
+
+        @flash_attn_wrapper.register_fake
+        def flash_attn_fake(q, k, v, dropout_p=0.0, causal=False):
+            # Output shape is the same as q.
+            return q.new_empty(q.shape)
+    except (AttributeError, RuntimeError) as error:
+        FLASH_ATTN_WRAPPER_ERROR = error
+
+        def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                        dropout_p: float = 0.0, causal: bool = False) -> torch.Tensor:
+            return flash_attn_func(q, k, v, dropout_p=dropout_p, causal=causal)
+else:
     def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     dropout_p: float = 0.0, causal: bool = False) -> torch.Tensor:
-        return flash_attn_func(q, k, v, dropout_p=dropout_p, causal=causal)
-
-
-    @flash_attn_wrapper.register_fake
-    def flash_attn_fake(q, k, v, dropout_p=0.0, causal=False):
-        # Output shape is the same as q
-        return q.new_empty(q.shape)
-except AttributeError as error:
-    FLASH_ATTN_ERROR = error
-
-    def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    dropout_p: float = 0.0, causal: bool = False) -> torch.Tensor:
-        assert False, f"Could not define flash_attn_wrapper: {FLASH_ATTN_ERROR}"
-
+        raise RuntimeError("FlashAttention is not available")
 
 def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
+    head_dim_check = _attention_head_dim(q, heads, skip_reshape)
+    can_flash, reason = _attention_can_use_flash(q, k, v, head_dim_check, mask, skip_reshape)
+    if not can_flash:
+        _count_attention_reason(reason)
+        _count_attention("sdpa")
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision,
+                                 skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape)
+
+    original_q, original_k, original_v = q, k, v
+    q, k, v = _attention_to_explicit_cuda_device(q, k, v)
+
     if skip_reshape:
         b, _, _, dim_head = q.shape
     else:
@@ -655,16 +799,7 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
             (q, k, v),
         )
 
-    if mask is not None:
-        # add a batch dimension if there isn't already one
-        if mask.ndim == 2:
-            mask = mask.unsqueeze(0)
-        # add a heads dimension if there isn't already one
-        if mask.ndim == 3:
-            mask = mask.unsqueeze(1)
-
     try:
-        assert mask is None
         out = flash_attn_wrapper(
             q.transpose(1, 2),
             k.transpose(1, 2),
@@ -672,9 +807,13 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
             dropout_p=0.0,
             causal=False,
         ).transpose(1, 2)
+        _count_attention("flash")
     except Exception as e:
-        logging.warning(f"Flash Attention failed, using default SDPA: {e}")
-        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
+        logging.warning(f"FlashAttention failed, using pytorch SDPA: {e}")
+        _count_attention("flash_error")
+        _count_attention("sdpa")
+        return attention_pytorch(original_q, original_k, original_v, heads, mask=mask, attn_precision=attn_precision,
+                                 skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape)
     if not skip_output_reshape:
         out = (
             out.transpose(1, 2).reshape(b, -1, heads * dim_head)
@@ -688,7 +827,10 @@ if model_management.sage_attention3_enabled():
     print("Using sage attention 3")
     optimized_attention = attention_sage3
 elif model_management.sage_attention_enabled():
-    print("Using sage attention 1.x/2.x")
+    if FLASH_ATTN_AVAILABLE:
+        print("Using sage attention 1.x/2.x (with flash attention fallback for unsupported head_dims)")
+    else:
+        print("Using sage attention 1.x/2.x (with pytorch SDPA fallback for unsupported head_dims)")
     optimized_attention = attention_sage
 elif model_management.xformers_enabled():
     print("Using xformers attention")

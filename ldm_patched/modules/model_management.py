@@ -225,6 +225,9 @@ print("Total VRAM {:0.0f} MB, total RAM {:0.0f} MB".format(total_vram, total_ram
 
 try:
     print("pytorch version: {}".format(torch_version))
+    print("CUDA version: {}".format(torch.version.cuda))
+    print("CUDA available: {}".format(torch.cuda.is_available()))
+    print("GPU: {}".format(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"))
     mac_ver = mac_version()
     if mac_ver is not None:
         print("Mac Version {}".format(mac_ver))
@@ -326,9 +329,19 @@ if ENABLE_PYTORCH_ATTENTION:
 if is_nvidia() and not args.pytorch_deterministic:
     try:
         torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
+        # Use the new API (fp32_precision) on PyTorch >= 2.9 to avoid deprecation
+        # warnings. Fall back to the legacy API (allow_tf32) on older versions.
+        import warnings as _tf32_warnings
+        with _tf32_warnings.catch_warnings():
+            _tf32_warnings.filterwarnings("ignore", category=UserWarning,
+                                          message=".*TF32.*")
+            try:
+                torch.backends.cudnn.conv.fp32_precision = "tf32"
+                torch.backends.cuda.matmul.fp32_precision = "tf32"
+            except (AttributeError, RuntimeError):
+                torch.backends.cudnn.allow_tf32 = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")
         print("Enabled CUDA inference optimizations: cudnn benchmark, TF32 matmul")
     except Exception as e:
         logging.warning(f"Warning, could not enable CUDA inference optimizations: {e}")
