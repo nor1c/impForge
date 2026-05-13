@@ -349,6 +349,17 @@ try:
 except:
     logging.warning("Warning, could not set allow_fp16_bf16_reduction_math_sdp")
 
+# Enable reduced-precision accumulation in general matmul (not just SDP).
+# Blackwell (sm_120) supports this natively and it's a net win for inference.
+try:
+    if is_nvidia() and torch_version_numeric >= (2, 0):
+        if hasattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction"):
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+        if hasattr(torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction"):
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+except Exception as e:
+    logging.warning(f"Warning, could not set reduced precision matmul reduction: {e}")
+
 if args.always_low_vram:
     set_vram_to = VRAMState.LOW_VRAM
     lowvram_available = True
@@ -668,6 +679,14 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             new_or_replaced_model = True
 
     if not new_or_replaced_model and not force_patch_weights and not force_full_load:
+        # HIGH_VRAM fast path: if nothing new needs loading and we're in
+        # --always-gpu mode, skip the per-model inspection (which calls
+        # get_free_memory() — a CUDA sync point — and should_reload_model).
+        # In HIGH_VRAM we never offload, so all models that are loaded stay
+        # valid across calls.
+        if vram_state == VRAMState.HIGH_VRAM:
+            return
+
         can_reuse_loaded_models = True
         for loaded_model in models_to_load:
             if loaded_model.should_reload_model(force_patch_weights):
@@ -750,6 +769,11 @@ def loaded_models(only_currently_used=False):
     return output
 
 def cleanup_models_gc():
+    # HIGH_VRAM fast path: models never get offloaded or gc'd in this mode,
+    # so the is_dead() scan on every load_models_gpu call is pure overhead.
+    if vram_state == VRAMState.HIGH_VRAM and len(current_loaded_models) > 0:
+        return
+
     do_gc = False
     for i in range(len(current_loaded_models)):
         cur = current_loaded_models[i]

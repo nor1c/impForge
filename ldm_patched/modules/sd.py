@@ -790,7 +790,12 @@ class VAE:
             pixel_samples = torch.empty((samples_in.shape[0], 3, round(samples_in.shape[2] * self.downscale_ratio), round(samples_in.shape[3] * self.downscale_ratio)), device=self.output_device)
             for x in range(0, samples_in.shape[0], batch_number):
                 samples = self._to_vae_latent(samples_in[x:x+batch_number]).to(self.vae_dtype).to(self.device)
-                pixel_samples[x:x+batch_number] = torch.clamp((self.first_stage_model.decode(samples).to(self.output_device).float() + 1.0) / 2.0, min=0.0, max=1.0)
+                # Clamp in the VAE's native dtype (bf16/fp16/fp32) to avoid a
+                # wasted up-cast before clamp. The final .float() cast is
+                # fused with the normalization step; fp32 is only required
+                # downstream at the image-save stage.
+                decoded = self.first_stage_model.decode(samples).to(self.output_device)
+                pixel_samples[x:x+batch_number] = torch.clamp((decoded + 1.0) / 2.0, min=0.0, max=1.0).float()
         except model_management.OOM_EXCEPTION:
             print("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.")
             pixel_samples = self.decode_tiled_(samples_in)
@@ -810,7 +815,11 @@ class VAE:
 
             for x in range(0, samples_in.shape[0], batch_number):
                 samples = self._to_vae_latent(samples_in[x:x+batch_number]).to(self.vae_dtype).to(self.device)
-                out = self.process_output(self.first_stage_model.decode(samples, **vae_options).to(self.output_device).float())
+                # Keep VAE output in its native dtype through process_output;
+                # the final .float() cast is deferred so clamp/normalize math
+                # runs in bf16/fp16 on Blackwell.
+                decoded = self.first_stage_model.decode(samples, **vae_options).to(self.output_device)
+                out = self.process_output(decoded).float()
                 if pixel_samples is None:
                     pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device)
                 pixel_samples[x:x+batch_number] = out

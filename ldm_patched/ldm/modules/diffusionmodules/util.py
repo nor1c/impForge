@@ -226,6 +226,26 @@ class CheckpointFunction(torch.autograd.Function):
         return (None, None) + input_grads
 
 
+# Perf: cache timestep frequency tensors. For a given (dim, max_period,
+# device), the freqs tensor is invariant across the entire sampling run and
+# actually across the entire session. Currently `timestep_embedding` rebuilds
+# it on every UNet forward (25+ calls per image). Caching it saves the
+# arange+exp kernel launches.
+_TIMESTEP_FREQS_CACHE = {}
+
+
+def _get_timestep_freqs(half, max_period, device):
+    key = (half, max_period, device)
+    cached = _TIMESTEP_FREQS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    freqs = torch.exp(
+        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=device) / half
+    )
+    _TIMESTEP_FREQS_CACHE[key] = freqs
+    return freqs
+
+
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
     """
     Create sinusoidal timestep embeddings.
@@ -237,9 +257,7 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
     """
     if not repeat_only:
         half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device) / half
-        )
+        freqs = _get_timestep_freqs(half, max_period, timesteps.device)
         args = timesteps[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:

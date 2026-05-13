@@ -18,6 +18,22 @@ import logging
 from modules import shared
 import numpy as np
 import ldm_patched.modules.sampler_helpers
+
+
+# Cached HIGH_VRAM mode detection. Computed once at import time so the
+# _calc_cond_batch hot path avoids an attribute lookup on every denoising step.
+# Re-queried lazily on first call to cover cases where vram_state changes
+# between module import and first sampling call.
+_HIGH_VRAM_CACHED = None
+
+
+def _is_high_vram():
+    global _HIGH_VRAM_CACHED
+    if _HIGH_VRAM_CACHED is None:
+        _HIGH_VRAM_CACHED = (
+            model_management.vram_state == model_management.VRAMState.HIGH_VRAM
+        )
+    return _HIGH_VRAM_CACHED
 import ldm_patched.modules.model_patcher
 import ldm_patched.modules.patcher_extension
 import ldm_patched.hooks
@@ -220,7 +236,7 @@ def _calc_cond_batch(model: 'BaseModel', conds: list[list[dict]], x_in: torch.Te
 
     for i in range(len(conds)):
         out_conds.append(torch.zeros_like(x_in))
-        out_counts.append(torch.ones_like(x_in) * 1e-37)
+        out_counts.append(torch.full_like(x_in, 1e-37))
 
         cond = conds[i]
         default_c = []
@@ -247,6 +263,14 @@ def _calc_cond_batch(model: 'BaseModel', conds: list[list[dict]], x_in: torch.Te
     if hasattr(model, 'current_patcher') and model.current_patcher is not None:
         model.current_patcher.prepare_state(timestep)
     # run every hooked_to_run separately
+    # HIGH_VRAM fast path: in --always-gpu / HIGH_VRAM mode, free memory is
+    # effectively unbounded for cond+uncond batching and never changes between
+    # denoising steps. Calling get_free_memory() every step does a CUDA
+    # memory_stats() query which acts as a sync point. Skip both the query
+    # and the batch-sizing loop; always batch all compatible conds together.
+    # _is_high_vram() caches the VRAM state after first call (module-level).
+    _high_vram = _is_high_vram()
+
     for hooks, to_run in hooked_to_run.items():
         while len(to_run) > 0:
             first = to_run[0]
@@ -259,19 +283,24 @@ def _calc_cond_batch(model: 'BaseModel', conds: list[list[dict]], x_in: torch.Te
             to_batch_temp.reverse()
             to_batch = to_batch_temp[:1]
 
-            free_memory = model_management.get_free_memory(x_in.device)
-            for i in range(1, len(to_batch_temp) + 1):
-                batch_amount = to_batch_temp[:len(to_batch_temp)//i]
-                input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
-                cond_shapes = collections.defaultdict(list)
-                for tt in batch_amount:
-                    cond = {k: v.size() for k, v in to_run[tt][0].conditioning.items()}
-                    for k, v in to_run[tt][0].conditioning.items():
-                        cond_shapes[k].append(v.size())
+            if _high_vram:
+                # Always batch everything compatible together. Memory is
+                # guaranteed sufficient in HIGH_VRAM mode.
+                to_batch = to_batch_temp
+            else:
+                free_memory = model_management.get_free_memory(x_in.device)
+                for i in range(1, len(to_batch_temp) + 1):
+                    batch_amount = to_batch_temp[:len(to_batch_temp)//i]
+                    input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
+                    cond_shapes = collections.defaultdict(list)
+                    for tt in batch_amount:
+                        cond = {k: v.size() for k, v in to_run[tt][0].conditioning.items()}
+                        for k, v in to_run[tt][0].conditioning.items():
+                            cond_shapes[k].append(v.size())
 
-                if model.memory_required(input_shape, cond_shapes=cond_shapes) * 1.5 < free_memory:
-                    to_batch = batch_amount
-                    break
+                    if model.memory_required(input_shape, cond_shapes=cond_shapes) * 1.5 < free_memory:
+                        to_batch = batch_amount
+                        break
 
             input_x = []
             mult = []
@@ -369,12 +398,37 @@ def _epsilon_scaling_post_cfg(args, scaling_factor: float):
     return x - scaled_noise_pred
 
 
-def _sdxl_cfg_rescale_post_cfg(cfg_result, cond_pred, cond_scale):
-    rescale = float(shared.opts.data.get("sdxl_cfg_rescale", 0.0))
-    min_cfg = float(shared.opts.data.get("sdxl_cfg_rescale_min_cfg", 5.0))
+def _resolve_perf_opts(model_options):
+    """Perf: resolve shared.opts lookups once per sampling run instead of
+    once per denoising step. Cached on model_options so the inner cfg_function
+    can read locals instead of going through shared.opts.data.get() every step."""
+    cache = model_options.get("_perf_opts_cache")
+    if cache is not None:
+        return cache
+    cache = {
+        "sdxl_cfg_rescale": float(shared.opts.data.get("sdxl_cfg_rescale", 0.0)),
+        "sdxl_cfg_rescale_min_cfg": float(shared.opts.data.get("sdxl_cfg_rescale_min_cfg", 5.0)),
+        "is_sdxl": bool(getattr(shared.sd_model, "is_sdxl", False)),
+        "epsilon_scaling_enabled": bool(getattr(shared.opts, "epsilon_scaling_enabled", False)),
+        "epsilon_scaling_factor": float(getattr(shared.opts, "epsilon_scaling_factor", 1.005)),
+    }
+    model_options["_perf_opts_cache"] = cache
+    return cache
+
+
+def _sdxl_cfg_rescale_post_cfg(cfg_result, cond_pred, cond_scale, perf_opts=None):
+    if perf_opts is not None:
+        rescale = perf_opts["sdxl_cfg_rescale"]
+        min_cfg = perf_opts["sdxl_cfg_rescale_min_cfg"]
+        is_sdxl = perf_opts["is_sdxl"]
+    else:
+        rescale = float(shared.opts.data.get("sdxl_cfg_rescale", 0.0))
+        min_cfg = float(shared.opts.data.get("sdxl_cfg_rescale_min_cfg", 5.0))
+        is_sdxl = getattr(shared.sd_model, "is_sdxl", False)
+
     if rescale <= 0.0 or cond_scale < min_cfg:
         return cfg_result
-    if not getattr(shared.sd_model, "is_sdxl", False):
+    if not is_sdxl:
         return cfg_result
 
     dims = tuple(range(1, cfg_result.ndim))
@@ -386,7 +440,12 @@ def _sdxl_cfg_rescale_post_cfg(cfg_result, cond_pred, cond_scale):
 
 
 def cfg_function(model, cond_pred, uncond_pred, cond_scale, x, timestep, model_options={}, cond=None, uncond=None):
-    edit_strength = sum((item.get('strength', 1) for item in cond))
+    # Perf: short-circuit the edit_strength sum for the common case
+    # (single cond, no 'strength' override) — the most frequent path by far.
+    if len(cond) == 1 and 'strength' not in cond[0]:
+        edit_strength = 1.0
+    else:
+        edit_strength = sum((item.get('strength', 1) for item in cond))
 
     if "sampler_cfg_function" in model_options:
         args = {
@@ -414,11 +473,14 @@ def cfg_function(model, cond_pred, uncond_pred, cond_scale, x, timestep, model_o
                 "sigma": timestep, "model_options": model_options, "input": x}
         cfg_result = fn(args)
 
-    if uncond_pred is not None:
-        cfg_result = _sdxl_cfg_rescale_post_cfg(cfg_result, cond_pred, cond_scale)
+    # Perf: resolve shared.opts once per run, cached on model_options.
+    perf_opts = _resolve_perf_opts(model_options)
 
-    if getattr(shared.opts, "epsilon_scaling_enabled", False):
-        scaling_factor = getattr(shared.opts, "epsilon_scaling_factor", 1.005)
+    if uncond_pred is not None and perf_opts["sdxl_cfg_rescale"] > 0.0 and perf_opts["is_sdxl"]:
+        cfg_result = _sdxl_cfg_rescale_post_cfg(cfg_result, cond_pred, cond_scale, perf_opts=perf_opts)
+
+    if perf_opts["epsilon_scaling_enabled"]:
+        scaling_factor = perf_opts["epsilon_scaling_factor"]
         if math.isclose(scaling_factor, 0.0):
             scaling_factor = 1e-9
         args = {"denoised": cfg_result, "cond": cond, "uncond": uncond, "cond_scale": cond_scale, "model": model, "uncond_denoised": uncond_pred, "cond_denoised": cond_pred,

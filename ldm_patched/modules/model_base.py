@@ -191,7 +191,12 @@ class BaseModel(torch.nn.Module):
             extra_conds[o] = extra
 
         t = self.process_timestep(t, x=x, **extra_conds)
-        model_output = self.diffusion_model(xc, t, context=context, control=control, transformer_options=transformer_options, **extra_conds).float()
+        # Perf: avoid forcing fp32 on the UNet output here. The outer sampler
+        # casts to fp32 once at the end (CFGGuider.sample), and
+        # calculate_denoised runs fine in the model dtype (fp16/bf16 on
+        # Blackwell). Removing this .float() saves a full-resolution fp32
+        # buffer allocation + cast per denoising step.
+        model_output = self.diffusion_model(xc, t, context=context, control=control, transformer_options=transformer_options, **extra_conds)
         return self.model_sampling.calculate_denoised(sigma, model_output, x)
 
     def process_timestep(self, timestep, **kwargs):
