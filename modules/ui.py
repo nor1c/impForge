@@ -492,6 +492,11 @@ def create_ui():
             ))
 
             txt2img_metadata_paste_fields = parameters_copypaste.add_override_settings_to_paste_fields(txt2img_paste_fields, override_settings)
+            txt2img_seed_component = scripts.scripts_txt2img.script('Seed').seed
+            txt2img_seed_index = next(
+                (i for i, field in enumerate(txt2img_metadata_paste_fields) if field[0] is txt2img_seed_component),
+                None,
+            )
 
             def paste_txt2img_metadata(image_data):
                 def empty_response():
@@ -509,7 +514,10 @@ def create_ui():
                 if not geninfo:
                     return empty_response()
 
-                return parameters_copypaste.infotext_to_paste_outputs(geninfo, txt2img_metadata_paste_fields) + [None]
+                outputs = parameters_copypaste.infotext_to_paste_outputs(geninfo, txt2img_metadata_paste_fields)
+                if txt2img_seed_index is not None:
+                    outputs[txt2img_seed_index] = gr.update(value=-1)
+                return outputs + [None]
 
             txt2img_metadata_image.change(
                 fn=paste_txt2img_metadata,
