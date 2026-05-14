@@ -1,7 +1,32 @@
 // allows drag-dropping files into gradio image elements, and also pasting images from clipboard
 
 function isValidImageList(files) {
-    return files && files?.length === 1 && ['image/png', 'image/gif', 'image/jpeg'].includes(files[0].type);
+    return files && files?.length === 1 && ['image/png', 'image/gif', 'image/jpeg', 'image/webp'].includes(files[0].type);
+}
+
+function setImageFiles(imgWrap, files) {
+    if (!isValidImageList(files)) {
+        return false;
+    }
+
+    const tmpFile = files[0];
+    const fileInput = imgWrap?.querySelector('input[type="file"]');
+    if (!fileInput) {
+        return false;
+    }
+
+    fileInput.value = '';
+
+    if (files.length === 0) {
+        files = new DataTransfer();
+        files.items.add(tmpFile);
+        fileInput.files = files.files;
+    } else {
+        fileInput.files = files;
+    }
+    fileInput.dispatchEvent(new Event('change'));
+
+    return true;
 }
 
 function dropReplaceImage(imgWrap, files) {
@@ -9,22 +34,8 @@ function dropReplaceImage(imgWrap, files) {
         return;
     }
 
-    const tmpFile = files[0];
-
     imgWrap.querySelector('.modify-upload button + button, .touch-none + div button + button')?.click();
-    const callback = () => {
-        const fileInput = imgWrap.querySelector('input[type="file"]');
-        if (fileInput) {
-            if (files.length === 0) {
-                files = new DataTransfer();
-                files.items.add(tmpFile);
-                fileInput.files = files.files;
-            } else {
-                fileInput.files = files;
-            }
-            fileInput.dispatchEvent(new Event('change'));
-        }
-    };
+    const callback = () => setImageFiles(imgWrap, files);
 
     if (imgWrap.closest('#pnginfo_image')) {
         // special treatment for PNG Info tab, wait for fetch request to finish
@@ -71,12 +82,21 @@ function dragDropTargetIsPrompt(target) {
     return false;
 }
 
+function dragDropTargetIsTxt2img(target) {
+    const txt2imgTab = target.closest('#tab_txt2img');
+    return txt2imgTab && uiElementIsVisible(txt2imgTab);
+}
+
+function dropImageToTxt2imgMetadata(files) {
+    return setImageFiles(gradioApp().getElementById('txt2img_metadata_image'), files);
+}
+
 window.document.addEventListener('dragover', e => {
     const target = e.composedPath()[0];
     if (!eventHasFiles(e)) return;
 
     var targetImage = target.closest('[data-testid="image"]');
-    if (!dragDropTargetIsPrompt(target) && !targetImage) return;
+    if (!dragDropTargetIsPrompt(target) && !targetImage && !dragDropTargetIsTxt2img(target)) return;
 
     e.stopPropagation();
     e.preventDefault();
@@ -87,6 +107,14 @@ window.document.addEventListener('drop', async e => {
     const target = e.composedPath()[0];
     const url = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
     if (!eventHasFiles(e) && !isURL(url)) return;
+
+    if (eventHasFiles(e) && dragDropTargetIsTxt2img(target)) {
+        e.stopPropagation();
+        e.preventDefault();
+
+        dropImageToTxt2imgMetadata(e.dataTransfer.files);
+        return;
+    }
 
     if (dragDropTargetIsPrompt(target)) {
         e.stopPropagation();
@@ -127,6 +155,7 @@ window.document.addEventListener('drop', async e => {
         dropReplaceImage(targetImage, files);
         return;
     }
+
 });
 
 window.addEventListener('paste', e => {

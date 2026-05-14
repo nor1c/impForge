@@ -479,6 +479,60 @@ def get_override_settings(params, *, skip_fields=None):
     return res
 
 
+def infotext_to_paste_outputs(prompt, paste_fields):
+    prompt = prompt or ""
+    params = parse_generation_parameters(prompt)
+    script_callbacks.infotext_pasted_callback(prompt, params)
+    res = []
+
+    for output, key in paste_fields:
+        if callable(key):
+            try:
+                v = key(params)
+            except Exception:
+                errors.report(f"Error executing {key}", exc_info=True)
+                v = None
+        else:
+            v = params.get(key, None)
+
+        if v is None:
+            res.append(gr.update())
+        elif isinstance(v, type_of_gr_update):
+            res.append(v)
+        else:
+            try:
+                valtype = type(output.value)
+
+                if valtype == bool and v == "False":
+                    val = False
+                elif valtype == int:
+                    val = float(v)
+                else:
+                    val = valtype(v)
+
+                res.append(gr.update(value=val))
+            except Exception:
+                res.append(gr.update())
+
+    return res
+
+
+def add_override_settings_to_paste_fields(paste_fields, override_settings_component):
+    if override_settings_component is None:
+        return paste_fields
+
+    already_handled_fields = {key: 1 for _, key in paste_fields}
+
+    def paste_settings(params):
+        vals = get_override_settings(params, skip_fields=already_handled_fields)
+
+        vals_pairs = [f"{infotext_text}: {value}" for infotext_text, setting_name, value in vals]
+
+        return gr.Dropdown.update(value=vals_pairs, choices=vals_pairs, visible=bool(vals_pairs))
+
+    return paste_fields + [(override_settings_component, paste_settings)]
+
+
 def connect_paste(button, paste_fields, input_comp, override_settings_component, tabname):
     def paste_func(prompt):
         if not prompt and not shared.cmd_opts.hide_ui_dir_config and not shared.cmd_opts.no_prompt_history:
@@ -489,52 +543,9 @@ def connect_paste(button, paste_fields, input_comp, override_settings_component,
             except OSError:
                 pass
 
-        params = parse_generation_parameters(prompt)
-        script_callbacks.infotext_pasted_callback(prompt, params)
-        res = []
+        return infotext_to_paste_outputs(prompt, paste_fields)
 
-        for output, key in paste_fields:
-            if callable(key):
-                try:
-                    v = key(params)
-                except Exception:
-                    errors.report(f"Error executing {key}", exc_info=True)
-                    v = None
-            else:
-                v = params.get(key, None)
-
-            if v is None:
-                res.append(gr.update())
-            elif isinstance(v, type_of_gr_update):
-                res.append(v)
-            else:
-                try:
-                    valtype = type(output.value)
-
-                    if valtype == bool and v == "False":
-                        val = False
-                    elif valtype == int:
-                        val = float(v)
-                    else:
-                        val = valtype(v)
-
-                    res.append(gr.update(value=val))
-                except Exception:
-                    res.append(gr.update())
-
-        return res
-
-    if override_settings_component is not None:
-        already_handled_fields = {key: 1 for _, key in paste_fields}
-
-        def paste_settings(params):
-            vals = get_override_settings(params, skip_fields=already_handled_fields)
-
-            vals_pairs = [f"{infotext_text}: {value}" for infotext_text, setting_name, value in vals]
-
-            return gr.Dropdown.update(value=vals_pairs, choices=vals_pairs, visible=bool(vals_pairs))
-
-        paste_fields = paste_fields + [(override_settings_component, paste_settings)]
+    paste_fields = add_override_settings_to_paste_fields(paste_fields, override_settings_component)
 
     button.click(
         fn=paste_func,

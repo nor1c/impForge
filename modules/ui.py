@@ -1,4 +1,5 @@
 import datetime
+import io
 import mimetypes
 import os
 import sys
@@ -13,7 +14,7 @@ from PIL import Image, PngImagePlugin  # noqa: F401
 from modules.call_queue import wrap_gradio_gpu_call, wrap_queued_call, wrap_gradio_call, wrap_gradio_call_no_job # noqa: F401
 
 from modules import gradio_extensons, sd_schedulers  # noqa: F401
-from modules import sd_hijack, sd_models, script_callbacks, ui_extensions, deepbooru, extra_networks, ui_common, ui_postprocessing, progress, ui_loadsave, shared_items, ui_settings, timer, sysinfo, ui_checkpoint_merger, scripts, sd_samplers, processing, ui_extra_networks, ui_toprow, launch_utils
+from modules import sd_hijack, sd_models, script_callbacks, ui_extensions, deepbooru, extra_networks, ui_common, ui_postprocessing, progress, ui_loadsave, shared_items, ui_settings, timer, sysinfo, ui_checkpoint_merger, scripts, sd_samplers, processing, ui_extra_networks, ui_toprow, launch_utils, images
 from modules.ui_components import FormRow, FormGroup, ToolButton, FormHTML, InputAccordion, ResizeHandleRow
 from modules.paths import script_path
 from modules.ui_common import create_refresh_button
@@ -277,6 +278,7 @@ def create_ui():
         toprow = ui_toprow.Toprow(is_img2img=False, is_compact=shared.opts.compact_prompt_box)
 
         dummy_component = gr.Label(visible=False)
+        txt2img_metadata_image = gr.File(label="", elem_id="txt2img_metadata_image", file_count="single", type="binary", visible=False)
 
         extra_tabs = gr.Tabs(elem_id="txt2img_extra_tabs", elem_classes=["extra-networks"])
         extra_tabs.__enter__()
@@ -488,6 +490,36 @@ def create_ui():
             parameters_copypaste.register_paste_params_button(parameters_copypaste.ParamBinding(
                 paste_button=toprow.paste, tabname="txt2img", source_text_component=toprow.prompt, source_image_component=None,
             ))
+
+            txt2img_metadata_paste_fields = parameters_copypaste.add_override_settings_to_paste_fields(txt2img_paste_fields, override_settings)
+
+            def paste_txt2img_metadata(image_data):
+                if image_data is None:
+                    return [gr.update() for _ in txt2img_metadata_paste_fields]
+
+                try:
+                    image = images.read(io.BytesIO(image_data))
+                    geninfo, _ = images.read_info_from_image(image)
+                except Exception:
+                    return [gr.update() for _ in txt2img_metadata_paste_fields]
+
+                if not geninfo:
+                    return [gr.update() for _ in txt2img_metadata_paste_fields]
+
+                return parameters_copypaste.infotext_to_paste_outputs(geninfo, txt2img_metadata_paste_fields)
+
+            txt2img_metadata_image.change(
+                fn=paste_txt2img_metadata,
+                inputs=[txt2img_metadata_image],
+                outputs=[x[0] for x in txt2img_metadata_paste_fields],
+                show_progress=False,
+            ).then(
+                fn=None,
+                _js="recalculate_prompts_txt2img",
+                inputs=[],
+                outputs=[],
+                show_progress=False,
+            )
 
             steps = scripts.scripts_txt2img.script('Sampler').steps
 
