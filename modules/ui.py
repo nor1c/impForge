@@ -494,24 +494,27 @@ def create_ui():
             txt2img_metadata_paste_fields = parameters_copypaste.add_override_settings_to_paste_fields(txt2img_paste_fields, override_settings)
 
             def paste_txt2img_metadata(image_data):
+                def empty_response():
+                    return [gr.update() for _ in txt2img_metadata_paste_fields] + [None]
+
                 if image_data is None:
-                    return [gr.update() for _ in txt2img_metadata_paste_fields]
+                    return empty_response()
 
                 try:
                     image = images.read(io.BytesIO(image_data))
                     geninfo, _ = images.read_info_from_image(image)
                 except Exception:
-                    return [gr.update() for _ in txt2img_metadata_paste_fields]
+                    return empty_response()
 
                 if not geninfo:
-                    return [gr.update() for _ in txt2img_metadata_paste_fields]
+                    return empty_response()
 
-                return parameters_copypaste.infotext_to_paste_outputs(geninfo, txt2img_metadata_paste_fields)
+                return parameters_copypaste.infotext_to_paste_outputs(geninfo, txt2img_metadata_paste_fields) + [None]
 
             txt2img_metadata_image.change(
                 fn=paste_txt2img_metadata,
                 inputs=[txt2img_metadata_image],
-                outputs=[x[0] for x in txt2img_metadata_paste_fields],
+                outputs=[x[0] for x in txt2img_metadata_paste_fields] + [txt2img_metadata_image],
                 show_progress=False,
             ).then(
                 fn=None,
