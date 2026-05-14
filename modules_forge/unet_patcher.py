@@ -15,6 +15,10 @@ class UnetPatcher(ModelPatcher):
         self.extra_model_patchers_during_sampling = []
         self.extra_concat_condition = None
         self.compiled = False
+        self.compile_signature = None
+        self._compile_original_model = None
+        self._compile_reuse_logged = set()
+        self._compile_failed_signatures = set()
 
     def clone(self):
         n = UnetPatcher(self.model, self.load_device, self.offload_device, self.size)
@@ -31,6 +35,10 @@ class UnetPatcher(ModelPatcher):
         n.backup = self.backup
         n.object_patches_backup = self.object_patches_backup
         n.compiled = self.compiled
+        n.compile_signature = self.compile_signature
+        n._compile_original_model = self._compile_original_model
+        n._compile_reuse_logged = self._compile_reuse_logged.copy()
+        n._compile_failed_signatures = self._compile_failed_signatures.copy()
         n.parent = self
         return n
 
@@ -65,98 +73,165 @@ class UnetPatcher(ModelPatcher):
         self.add_extra_model_patcher_during_sampling(patcher)
         return patcher
     
-    # LoRAs don't work (again)
-    def compile_model(self, backend="inductor"):
-        """Compile the self model using torch.compile"""
+    def _compile_settings(self, backend):
+        force_disable_cudagraphs = getattr(args, "cuda_malloc", False)
+        has_custom_options = any([
+            args.torch_compile_epilogue_fusion,
+            args.torch_compile_max_autotune,
+            args.torch_compile_fallback_random,
+            args.torch_compile_shape_padding,
+            args.torch_compile_cudagraphs,
+            args.torch_compile_trace,
+            args.torch_compile_graph_diagram
+        ])
+
+        if backend == "cudagraphs":
+            if force_disable_cudagraphs:
+                print("torch.compile backend cudagraphs is incompatible with --cuda-malloc; using inductor without cudagraphs instead.")
+                backend = "inductor"
+            else:
+                return {
+                    "backend": backend,
+                    "fullgraph": True,
+                    "dynamic": False,
+                }
+
+        if force_disable_cudagraphs and args.torch_compile_mode == "reduce-overhead":
+            print("torch.compile reduce-overhead uses CUDA graphs, which are incompatible with --cuda-malloc; disabling Inductor cudagraphs for this compile.")
+
+        if force_disable_cudagraphs:
+            return {
+                "backend": backend,
+                "fullgraph": False,
+                "dynamic": False,
+                "options": {
+                    "triton.cudagraphs": False,
+                    "triton.cudagraph_trees": False,
+                },
+            }
+
+        compile_settings = {
+            "backend": backend,
+            "fullgraph": False,
+            "dynamic": False,
+        }
+
+        if has_custom_options:
+            options = {}
+            if args.torch_compile_epilogue_fusion:
+                options["epilogue_fusion"] = True
+            if args.torch_compile_max_autotune:
+                options["max_autotune"] = True
+            if args.torch_compile_fallback_random:
+                options["fallback_random"] = True
+            if args.torch_compile_shape_padding:
+                options["shape_padding"] = True
+            if args.torch_compile_cudagraphs:
+                options["triton.cudagraphs"] = True
+            if args.torch_compile_trace:
+                options["trace.enabled"] = True
+            if args.torch_compile_graph_diagram:
+                options["trace.graph_diagram"] = True
+            compile_settings["options"] = options
+        else:
+            compile_settings["mode"] = args.torch_compile_mode
+
+        return compile_settings
+
+    def _get_diffusion_model(self):
+        if hasattr(self.model, 'diffusion_model'):
+            return self.model.diffusion_model
+        return self.model
+
+    def _set_diffusion_model(self, model):
+        if hasattr(self.model, 'diffusion_model'):
+            self.model.diffusion_model = model
+        else:
+            self.model = model
+
+    def compile_model(self, backend="inductor", signature=None, quiet_reuse=False):
+        """Compile the UNet after model/LoRA patches are selected."""
         if not hasattr(torch, 'compile'):
             print("torch.compile not available - requires PyTorch 2.0 or newer")
-            return
+            return False
+
+        if self.compiled and self.compile_signature == signature:
+            reuse_key = repr(signature)
+            if not quiet_reuse and reuse_key not in self._compile_reuse_logged:
+                print(f"Reusing compiled UNet for signature: {signature}")
+                self._compile_reuse_logged.add(reuse_key)
+            return True
+
+        failure_key = repr(signature)
+        if failure_key in self._compile_failed_signatures:
+            return False
         
         try:
             torch_version = torch.__version__.split('.')
             if int(torch_version[0]) < 2:
                 print(f"torch.compile requires PyTorch 2.0 or newer. Current version: {torch.__version__}")
-                return
+                return False
 
             import torch._dynamo as dynamo
             dynamo.config.suppress_errors = True
             dynamo.config.verbose = True
             dynamo.config.cache_size_limit = 32
 
-            # Get the actual model to compile
-            if hasattr(self.model, 'diffusion_model'):
-                real_model = self.model.diffusion_model
-            else:
-                real_model = self.model
+            real_model = self._compile_original_model or self._get_diffusion_model()
+            real_model = getattr(real_model, "_orig_mod", real_model)
+            self._compile_original_model = real_model
+            compile_settings = self._compile_settings(backend)
 
-            # Check if any individual options are enabled
-            has_custom_options = any([
-                args.torch_compile_epilogue_fusion,
-                args.torch_compile_max_autotune,
-                args.torch_compile_fallback_random,
-                args.torch_compile_shape_padding,
-                args.torch_compile_cudagraphs,
-                args.torch_compile_trace,
-                args.torch_compile_graph_diagram
-            ])
-
-            if backend == "cudagraphs":
-                # Simplified settings for cudagraphs
-                compile_settings = {
-                    "backend": backend,
-                    "fullgraph": True,
-                    "dynamic": True,
-                }
-            else:  # inductor and other backends
-                compile_settings = {
-                    "backend": backend,
-                    "fullgraph": False,
-                    "dynamic": True,
-                }
-
-                if has_custom_options:
-                    # If any custom options are specified, use options instead of mode
-                    options = {}
-                    if args.torch_compile_epilogue_fusion:
-                        options["epilogue_fusion"] = True
-                    if args.torch_compile_max_autotune:
-                        options["max_autotune"] = True
-                    if args.torch_compile_fallback_random:
-                        options["fallback_random"] = True
-                    if args.torch_compile_shape_padding:
-                        options["shape_padding"] = True
-                    if args.torch_compile_cudagraphs:
-                        options["triton.cudagraphs"] = True
-                    if args.torch_compile_trace:
-                        options["trace.enabled"] = True
-                    if args.torch_compile_graph_diagram:
-                        options["trace.graph_diagram"] = True
-
-                    compile_settings["options"] = options
-                else:
-                    # If no custom options, use the selected mode
-                    compile_settings["mode"] = args.torch_compile_mode
-
-            print(f"Compiling model using torch.compile with settings: {compile_settings}")
+            print(f"Compiling UNet using torch.compile with settings: {compile_settings}")
+            if signature is not None:
+                print(f"Compile signature: {signature}")
 
             # Store settings for later recompilation if needed
             real_model.compile_settings = compile_settings
             
             try:
                 compiled_model = torch.compile(real_model, **compile_settings)
-                if hasattr(self.model, 'diffusion_model'):
-                    self.model.diffusion_model = compiled_model
-                else:
-                    self.model = compiled_model
-                print("Model compilation successful with dynamic shapes support")
+                self._set_diffusion_model(compiled_model)
+                self.compiled = True
+                self.compile_signature = signature
+                print("UNet compilation successful")
                 return True
             except Exception as e:
                 print(f"Warning: torch.compile failed with error: {str(e)}")
                 print("Falling back to uncompiled model")
+                self._set_diffusion_model(real_model)
+                self.compiled = False
+                self.compile_signature = None
+                self._compile_failed_signatures.add(failure_key)
                 return False
         except Exception as e:
             print(f"Error during model compilation: {str(e)}")
+            self._compile_failed_signatures.add(repr(signature))
             return False
+
+    def compile_model_if_needed(self, signature=None):
+        if not args.torch_compile:
+            return False
+        return self.compile_model(backend=args.torch_compile_backend, signature=signature)
+
+    def restore_uncompiled_model(self):
+        if self._compile_original_model is None:
+            return False
+        self._set_diffusion_model(self._compile_original_model)
+        self.compiled = False
+        self.compile_signature = None
+        return True
+
+    def mark_compile_signature_failed(self, signature=None):
+        self._compile_failed_signatures.add(repr(signature))
+        return self.restore_uncompiled_model()
+
+    def set_cuda_graph_context(self, context):
+        diffusion_model = self._get_diffusion_model()
+        if hasattr(diffusion_model, "set_cache_context"):
+            diffusion_model.set_cache_context(context)
+            return True
+        return False
 
     def add_patched_controlnet(self, cnet):
         cnet.set_previous_controlnet(self.controlnet_linked_list)

@@ -17,6 +17,7 @@ set COMMANDLINE_ARGS=^
   --vae-in-bf16 ^
   --no-hashing ^
   --use-sage-attention ^
+  --unet-cuda-graph ^
   --port 44444 ^
   --ckpt-dir "F:\AI\MODELS\CKPT" ^
   --lora-dir "F:\AI\MODELS\Lora" ^

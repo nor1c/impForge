@@ -34,6 +34,7 @@ set COMMANDLINE_ARGS=^
   --vae-in-bf16 ^
   --no-hashing ^
   --use-sage-attention ^
+  --unet-cuda-graph ^
   --port 44444 ^
   --ckpt-dir "F:\AI\MODELS\CKPT" ^
   --lora-dir "F:\AI\MODELS\Lora" ^
@@ -44,7 +45,6 @@ set COMMANDLINE_ARGS=^
 Do not add these unless retesting carefully:
 
 - `--use-flash-attention`: not needed; FlashAttention is loaded internally as Sage fallback.
-- `--unet-cuda-graph`: previously broke LoRA/model loading.
 - `--always-high-vram` together with `--always-gpu`: these are mutually exclusive.
 - `--fast fp8_matrix_mult cublas_ops`: avoid until quality/speed is retested.
 
@@ -183,6 +183,64 @@ Healthy output:
 - `sage_error` and `flash_error` should be zero or absent.
 
 If `sage_error` or `flash_error` appears, copy the full console output and debug `ldm_patched/ldm/modules/attention.py` routing first.
+
+## Optional Torch Compile Test
+
+Current status on this machine: not recommended for normal use. Testing showed two bad paths:
+
+- With `--cuda-malloc`, Inductor CUDA graphs must be disabled and compiled sampling became extremely slow.
+- Without `--cuda-malloc`, Inductor/Triton crashed during sampling with static CUDA launcher errors.
+
+Keep `--torch-compile` out of `webui-user.bat` unless this is being re-tested deliberately.
+
+For fixed resolutions and fixed LoRA sets, this repo can now defer `torch.compile` until after LoRA activation. This avoids compiling the base UNet before LoRA patches are selected.
+
+Recommended first test flags:
+
+```bat
+--torch-compile ^
+--torch-compile-backend inductor ^
+--torch-compile-mode reduce-overhead ^
+--forge-benchmark-timing
+```
+
+Expected behavior:
+
+- The first generation for a checkpoint/LoRA/resolution signature can be much slower because PyTorch compiles the UNet.
+- Later generations with the same checkpoint, LoRA set, batch size, and resolution should reuse the compiled UNet.
+- Changing checkpoint, LoRA set, batch size, or resolution creates a new compile signature.
+- If compile fails, the code restores the eager UNet and continues.
+- If `--cuda-malloc` is enabled, Inductor CUDA graphs are disabled automatically because PyTorch cannot use `cudaMallocAsync` with CUDA graph memory-pool live-allocation checks.
+
+Benchmark output looks like:
+
+```text
+[Forge benchmark] total=...s | setup/prompts=...s | extra_networks=...s | conditioning=...s | torch_compile=...s | sampling=...s | vae_decode=...s | postprocess/save=...s | batch_total=...s
+```
+
+Use the second and third generations after compile as the real speed comparison. Do not judge by the first compile run.
+
+Avoid while testing compile:
+
+- Random resolution changes.
+- Frequently changing LoRA sets.
+- `--unet-cuda-graph` at the same time, until compile has been tested alone.
+- `--torch-compile-mode max-autotune` unless you are prepared for much longer compile time.
+
+If you specifically want to benchmark Inductor's `reduce-overhead` CUDA graph path, temporarily remove `--cuda-malloc` from launch flags and compare against the safer `--cuda-malloc` run. Keep whichever is faster and stable on this machine.
+
+## Native UNet CUDA Graph
+
+`--unet-cuda-graph` uses this repo's lightweight CUDA graph wrapper rather than PyTorch Inductor/Triton. It is intended to reduce repeated UNet launch overhead without changing sampler math or image settings.
+
+Safety rules:
+
+- Captures only fixed-shape CUDA UNet calls.
+- Clears graph cache when checkpoint/LoRA signature changes.
+- Falls back to eager UNet when ControlNet, transformer patches, extra kwargs, or graph capture/replay errors are detected.
+- Does not require installing any package or wheel.
+
+The first compatible generation can be slower because the first graph capture runs warmup passes. Subsequent generations with the same checkpoint, LoRA set, and resolution are the useful comparison.
 
 ## Local Synthetic Test
 

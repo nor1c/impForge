@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import hashlib
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -940,12 +941,25 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
 def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
 
+    benchmark_timing = getattr(cmd_opts, "forge_benchmark_timing", False)
+    benchmark_start = time.perf_counter() if benchmark_timing else 0.0
+    benchmark_totals = {}
+
+    def benchmark_now():
+        return time.perf_counter() if benchmark_timing else 0.0
+
+    def benchmark_add(name, started):
+        if benchmark_timing:
+            benchmark_totals[name] = benchmark_totals.get(name, 0.0) + time.perf_counter() - started
+
     if isinstance(p.prompt, list):
         assert(len(p.prompt) > 0)
     else:
         assert p.prompt is not None
 
     devices.torch_gc()
+
+    setup_started = benchmark_now()
 
     seed = get_fixed_seed(p.seed)
     subseed = get_fixed_seed(p.subseed)
@@ -977,6 +991,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     else:
         pass
     p.setup_prompts()
+    benchmark_add("setup/prompts", setup_started)
 
     if isinstance(seed, list):
         p.all_seeds = seed
@@ -1018,6 +1033,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
         for n in range(p.n_iter):
             p.iteration = n
+            batch_started = benchmark_now()
 
             if state.skipped:
                 state.skipped = False
@@ -1044,12 +1060,14 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             p.parse_extra_network_prompts()
 
+            current_extra_data_sig = tuple(
+                (k, tuple(tuple(param.items) for param in v))
+                for k, v in sorted(p.extra_network_data.items())
+            ) if p.extra_network_data else ()
+
+            extra_networks_started = benchmark_now()
             if not p.disable_extra_networks:
                 sd_model = p.sd_model
-                current_extra_data_sig = tuple(
-                    (k, tuple(tuple(param.items) for param in v))
-                    for k, v in sorted(p.extra_network_data.items())
-                ) if p.extra_network_data else ()
 
                 if getattr(sd_model, '_cached_lora_sig', None) == current_extra_data_sig:
                     # Same LoRA configuration as last generation - reuse cached patched objects
@@ -1058,16 +1076,31 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 else:
                     # LoRA configuration changed or first run - load and cache
                     sd_model._cached_lora_sig = current_extra_data_sig
+                    original_unet = getattr(sd_model.forge_objects_original, "unet", None)
+                    if original_unet is not None and hasattr(original_unet, "restore_uncompiled_model"):
+                        original_unet.restore_uncompiled_model()
                     extra_networks.activate(p, p.extra_network_data)
                     sd_model._cached_lora_unet = sd_model.forge_objects_after_applying_lora.unet
                     sd_model._cached_lora_clip = sd_model.forge_objects_after_applying_lora.clip
+            benchmark_add("extra_networks", extra_networks_started)
 
             p.sd_model.forge_objects = p.sd_model.forge_objects_after_applying_lora.shallow_copy()
+            unet = getattr(p.sd_model.forge_objects, "unet", None)
+            if unet is not None and hasattr(unet, "set_cuda_graph_context"):
+                cuda_graph_context = (
+                    getattr(p.sd_model.sd_checkpoint_info, "filename", None),
+                    current_extra_data_sig,
+                )
+                unet.set_cuda_graph_context(cuda_graph_context)
 
+            scripts_batch_started = benchmark_now()
             if p.scripts is not None:
                 p.scripts.process_batch(p, batch_number=n, prompts=p.prompts, seeds=p.seeds, subseeds=p.subseeds)
+            benchmark_add("scripts_batch", scripts_batch_started)
 
+            conds_started = benchmark_now()
             p.setup_conds()
+            benchmark_add("conditioning", conds_started)
 
             p.extra_generation_params.update(model_hijack.extra_generation_params)
 
@@ -1106,7 +1139,52 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     sd_models.apply_alpha_schedule_override(p.sd_model, p, force_apply=force_apply_ztsnr)
                 p.sd_model.forge_objects.unet.model.model_sampling.set_sigmas(rescale_zero_terminal_snr_sigmas(p.sd_model.forge_objects.unet.model.model_sampling.sigmas).to(p.sd_model.forge_objects.unet.model.device))
 
-            samples_ddim = p.sample(conditioning=p.c, unconditional_conditioning=p.uc, seeds=p.seeds, subseeds=p.subseeds, subseed_strength=p.subseed_strength, prompts=p.prompts)
+            compile_started = benchmark_now()
+            compile_signature = None
+            compiled_unet = None
+            if getattr(cmd_opts, "torch_compile", False):
+                unet = getattr(p.sd_model.forge_objects, "unet", None)
+                if unet is not None and hasattr(unet, "compile_model_if_needed"):
+                    compiled_unet = unet
+                    compile_signature = (
+                        getattr(p.sd_model.sd_checkpoint_info, "filename", None),
+                        current_extra_data_sig,
+                        (p.batch_size, latent_channels, p.height // opt_f, p.width // opt_f),
+                        str(getattr(unet.model, "model_type", None)),
+                        str(getattr(unet.model, "manual_cast_dtype", None)),
+                        getattr(cmd_opts, "torch_compile_backend", None),
+                        getattr(cmd_opts, "torch_compile_mode", None),
+                    )
+                    unet.compile_model_if_needed(signature=compile_signature)
+            benchmark_add("torch_compile", compile_started)
+
+            sampling_started = benchmark_now()
+            try:
+                samples_ddim = p.sample(conditioning=p.c, unconditional_conditioning=p.uc, seeds=p.seeds, subseeds=p.subseeds, subseed_strength=p.subseed_strength, prompts=p.prompts)
+            except Exception as e:
+                message = str(e)
+                compile_runtime_error = (
+                    getattr(cmd_opts, "torch_compile", False)
+                    and compiled_unet is not None
+                    and (
+                        "cudaMallocAsync" in message
+                        or "checkPoolLiveAllocations" in message
+                        or "cudagraph" in message.lower()
+                        or "inductor" in message.lower()
+                        or "triton" in message.lower()
+                        or "static_cuda_launcher" in message.lower()
+                        or "too large to convert" in message.lower()
+                    )
+                )
+                if not compile_runtime_error:
+                    raise
+                print(f"torch.compile runtime failed, retrying this generation with eager UNet: {message}")
+                if hasattr(compiled_unet, "mark_compile_signature_failed"):
+                    compiled_unet.mark_compile_signature_failed(compile_signature)
+                elif hasattr(compiled_unet, "restore_uncompiled_model"):
+                    compiled_unet.restore_uncompiled_model()
+                samples_ddim = p.sample(conditioning=p.c, unconditional_conditioning=p.uc, seeds=p.seeds, subseeds=p.subseeds, subseed_strength=p.subseed_strength, prompts=p.prompts)
+            benchmark_add("sampling", sampling_started)
 
             if samples_ddim is not None:
                 for x_sample in samples_ddim:
@@ -1124,6 +1202,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 p.scripts.post_sample(p, ps)
                 samples_ddim = ps.samples
 
+            decode_started = benchmark_now()
             if getattr(samples_ddim, 'already_decoded', False):
                 x_samples_ddim = samples_ddim
             else:
@@ -1135,6 +1214,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             x_samples_ddim = torch.stack(x_samples_ddim).float()
             x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+            benchmark_add("vae_decode", decode_started)
 
             del samples_ddim
 
@@ -1142,6 +1222,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
 
             state.nextjob()
 
+            postprocess_started = benchmark_now()
             if p.scripts is not None:
                 p.scripts.postprocess_batch(p, x_samples_ddim, batch_number=n)
 
@@ -1250,6 +1331,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             del x_samples_ddim
 
             devices.torch_gc()
+            benchmark_add("postprocess/save", postprocess_started)
+            benchmark_add("batch_total", batch_started)
 
         if not infotexts:
             infotexts.append(Processed(p, []).infotext(p, 0))
@@ -1286,6 +1369,11 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
         infotexts=infotexts,
         extra_images_list=p.extra_result_images,
     )
+
+    if benchmark_timing:
+        total = time.perf_counter() - benchmark_start
+        parts = [f"{name}={elapsed:.3f}s" for name, elapsed in benchmark_totals.items()]
+        print(f"[Forge benchmark] total={total:.3f}s | " + " | ".join(parts))
 
     if p.scripts is not None:
         p.scripts.postprocess(p, res)

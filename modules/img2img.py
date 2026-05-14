@@ -150,12 +150,12 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
 
 
 def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, negative_prompt: str, prompt_styles, init_img, sketch, init_img_with_mask, inpaint_color_sketch, inpaint_color_sketch_orig, init_img_inpaint, init_mask_inpaint, mask_blur: int, mask_alpha: float, inpainting_fill: int, n_iter: int, batch_size: int, cfg_scale: float, image_cfg_scale: float, denoising_strength: float, selected_scale_tab: int, height: int, width: int, scale_by: float, resize_mode: int, inpaint_full_res: bool, inpaint_full_res_padding: int, inpainting_mask_invert: int, img2img_batch_input_dir: str, img2img_batch_output_dir: str, img2img_batch_inpaint_mask_dir: str, override_settings_texts, img2img_batch_use_png_info: bool, img2img_batch_png_info_props: list, img2img_batch_png_info_dir: str, *args):
-    # Reset attention backend counters so we can see which backend is used for this generation.
-    try:
-        from ldm_patched.ldm.modules.attention import reset_attention_counters
-        reset_attention_counters()
-    except Exception:
-        pass
+    if shared.cmd_opts.debug_mode:
+        try:
+            from ldm_patched.ldm.modules.attention import reset_attention_counters
+            reset_attention_counters()
+        except Exception:
+            pass
 
     override_settings = create_override_settings_dict(override_settings_texts)
 
@@ -243,12 +243,12 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
 
     shared.total_tqdm.clear()
 
-    # Print which attention backends were used and how many times.
-    try:
-        from ldm_patched.ldm.modules.attention import print_attention_counters
-        print_attention_counters()
-    except Exception:
-        pass
+    if shared.cmd_opts.debug_mode:
+        try:
+            from ldm_patched.ldm.modules.attention import print_attention_counters
+            print_attention_counters()
+        except Exception:
+            pass
 
     generation_info_js = processed.js()
     if opts.samples_log_stdout:

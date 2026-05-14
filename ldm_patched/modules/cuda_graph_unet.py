@@ -35,6 +35,7 @@ Why this is safe-ish
 - Only activated when --unet-cuda-graph is passed.
 """
 from __future__ import annotations
+import copy
 import logging
 import torch
 
@@ -52,6 +53,22 @@ class UNetCudaGraphWrapper:
         # permanently bailed out for that key.
         self._graphs: dict[tuple, "CapturedGraph | None"] = {}
         self._disabled = False
+        self._cache_context = None
+
+    def set_cache_context(self, context):
+        """Invalidate captured graphs when external model state changes.
+
+        LoRA patches are applied outside the wrapped UNet module. A graph
+        captured for one LoRA set must not be replayed for another.
+        """
+        if self._cache_context != context:
+            self._graphs.clear()
+            self._cache_context = context
+        return self
+
+    def clear_cache(self):
+        self._graphs.clear()
+        return self
 
     def __getattr__(self, name):
         # Delegate anything not on the wrapper to the inner model. Needed
@@ -63,15 +80,16 @@ class UNetCudaGraphWrapper:
         transformer_options = transformer_options or {}
         # Dynamic-control detection — bail out when anything could change
         # within the forward that our graph capture can't handle.
-        if self._disabled or control is not None:
+        if self._disabled or control is not None or x.device.type != "cuda":
             return self._inner(x, timesteps=timesteps, context=context, y=y,
                                 control=control,
                                 transformer_options=transformer_options, **kwargs)
-        patches = transformer_options.get("patches") if transformer_options else None
-        if patches:
+
+        if self._has_dynamic_transformer_options(transformer_options):
             return self._inner(x, timesteps=timesteps, context=context, y=y,
                                 control=control,
                                 transformer_options=transformer_options, **kwargs)
+
         if kwargs:
             # Any extra-conds we don't explicitly handle → fall back.
             return self._inner(x, timesteps=timesteps, context=context, y=y,
@@ -79,10 +97,12 @@ class UNetCudaGraphWrapper:
                                 transformer_options=transformer_options, **kwargs)
 
         key = (
-            tuple(x.shape), tuple(context.shape) if context is not None else None,
-            x.dtype,
-            None if y is None else tuple(y.shape),
-            None if timesteps is None else timesteps.shape,
+            self._cache_context,
+            tuple(x.shape), x.dtype, x.device.index,
+            self._tensor_key(timesteps),
+            self._tensor_key(context),
+            self._tensor_key(y),
+            tuple(transformer_options.get("cond_or_uncond", ())),
         )
 
         entry = self._graphs.get(key, False)
@@ -118,6 +138,7 @@ class UNetCudaGraphWrapper:
     def _capture(self, x, timesteps, context, y, transformer_options):
         """Run 2 warmup passes + 1 capture pass."""
         device = x.device
+        transformer_options = copy.copy(transformer_options)
         # Allocate static input buffers matching live shapes/dtypes.
         static_x = torch.empty_like(x)
         static_t = torch.empty_like(timesteps) if timesteps is not None else None
@@ -152,6 +173,31 @@ class UNetCudaGraphWrapper:
 
         logger.info("[UNet CUDA graph] captured for shape %s dtype %s", tuple(x.shape), x.dtype)
         return CapturedGraph(graph, static_x, static_t, static_ctx, static_y, captured_out)
+
+    @staticmethod
+    def _tensor_key(tensor):
+        if tensor is None:
+            return None
+        return (tuple(tensor.shape), tensor.dtype, tensor.device.type, tensor.device.index)
+
+    @staticmethod
+    def _has_dynamic_transformer_options(transformer_options):
+        if not transformer_options:
+            return False
+
+        # Only allow the stable metadata used by plain CFG batching. Anything
+        # patch-like can alter Python control flow or module state per step.
+        allowed_keys = {"cond_or_uncond"}
+        for key, value in transformer_options.items():
+            if key in allowed_keys:
+                continue
+            if key in {"patches", "patches_replace"}:
+                if value:
+                    return True
+                continue
+            return True
+
+        return False
 
 
 class CapturedGraph:

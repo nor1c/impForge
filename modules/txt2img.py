@@ -108,12 +108,12 @@ def txt2img_upscale_function(id_task: str, request: gr.Request, gallery, gallery
 def txt2img_function(id_task: str, request: gr.Request, *args):
     p = txt2img_create_processing(id_task, request, *args)
 
-    # Reset attention backend counters so we can see which backend is used for this generation.
-    try:
-        from ldm_patched.ldm.modules.attention import reset_attention_counters
-        reset_attention_counters()
-    except Exception:
-        pass
+    if shared.cmd_opts.debug_mode:
+        try:
+            from ldm_patched.ldm.modules.attention import reset_attention_counters
+            reset_attention_counters()
+        except Exception:
+            pass
 
     with closing(p):
         processed = modules.scripts.scripts_txt2img.run(p, *p.script_args)
@@ -123,12 +123,12 @@ def txt2img_function(id_task: str, request: gr.Request, *args):
 
     shared.total_tqdm.clear()
 
-    # Print which attention backends were used and how many times.
-    try:
-        from ldm_patched.ldm.modules.attention import print_attention_counters
-        print_attention_counters()
-    except Exception:
-        pass
+    if shared.cmd_opts.debug_mode:
+        try:
+            from ldm_patched.ldm.modules.attention import print_attention_counters
+            print_attention_counters()
+        except Exception:
+            pass
 
     generation_info_js = processed.js()
     if opts.samples_log_stdout:

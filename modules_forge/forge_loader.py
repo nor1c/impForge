@@ -450,10 +450,7 @@ def load_model_for_a1111(timer, checkpoint_info=None, state_dict=None):
     if hasattr(forge_objects, '_separate_te_loaded'):
         sd_model._separate_te_loaded = True
     if args.torch_compile:
-        timer.record("start model compilation")
-        if forge_objects.unet is not None:
-            forge_objects.unet.compile_model(backend=args.torch_compile_backend)
-        timer.record("model compilation complete")
+        timer.record("defer model compilation until after LoRA activation")
     timer.record("forge load real models")
     
     conditioner = getattr(sd_model, 'conditioner', None)

@@ -183,6 +183,7 @@ parser.add_argument("--disable-server-info", action="store_true", help="Disable 
 parser.add_argument("--cuda-stream", action="store_true")
 parser.add_argument("--pin-shared-memory", action="store_true")
 parser.add_argument("--nightly-builds", action="store_true", help="Use nightly PyTorch builds for compatible GPUs")
+parser.add_argument("--forge-benchmark-timing", action="store_true", help="Print compact per-generation timing for LoRA, conditioning, sampling, VAE decode, and save/postprocess phases.")
 
 parser.add_argument("--disable-metadata", action="store_true", help="Disable saving prompt metadata in files.")
 parser.add_argument("--disable-all-custom-nodes", action="store_true", help="Disable loading all custom nodes.")
