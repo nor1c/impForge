@@ -1,6 +1,7 @@
 import logging
 import gradio as gr
 from modules import scripts, shared_options as opts
+from modules.ui_components import InputAccordion
 
 class AdvancedModelSamplingScript(scripts.Script):
     def __init__(self):
@@ -21,10 +22,8 @@ class AdvancedModelSamplingScript(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, *args, **kwargs):
-        with gr.Accordion(open=False, label=self.title()):
+        with InputAccordion(self.enabled, label=self.title()) as enabled:
             gr.HTML("<p><i>Adjust the settings for Advanced Model Sampling.</i></p>")
-
-            enabled = gr.Checkbox(label="Enable Advanced Model Sampling", value=self.enabled)
 
             sampling_mode = gr.Radio(
                 ["Discrete", "Continuous EDM"],

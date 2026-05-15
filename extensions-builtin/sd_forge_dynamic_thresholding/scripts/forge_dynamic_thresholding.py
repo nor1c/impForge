@@ -1,6 +1,7 @@
 import gradio as gr
 
 from modules import scripts
+from modules.ui_components import InputAccordion
 from lib_dynamic_thresholding.dynthres import DynamicThresholdingComfyNode, DynamicThresholdingSimpleComfyNode
 
 opDynamicThresholdingNode = DynamicThresholdingComfyNode().patch
@@ -32,18 +33,12 @@ class DynamicThresholdingForForge(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, *args, **kwargs):
-        with gr.Accordion(open=False, label=self.title()):
-            with gr.Row():
-                enabled = gr.Checkbox(
-                    label='Enabled',
-                    value=False,
-                    info="Enable Dynamic Thresholding for the current generation"
-                )
-                simple_mode = gr.Checkbox(
-                    label='Simple Mode',
-                    value=False,
-                    info="Use simplified settings with only essential controls. Recommended for beginners"
-                )
+        with InputAccordion(False, label=self.title()) as enabled:
+            simple_mode = gr.Checkbox(
+                label='Simple Mode',
+                value=False,
+                info="Use simplified settings with only essential controls. Recommended for beginners"
+            )
             
             # Simple mode controls
             with gr.Group(visible=True) as simple_controls:

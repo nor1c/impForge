@@ -1,6 +1,7 @@
 import gradio as gr
 
 from modules import scripts
+from modules.ui_components import InputAccordion
 from ldm_patched.contrib.nodes_hypertile import HyperTile
 
 
@@ -17,8 +18,7 @@ class HyperTileForForge(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, *args, **kwargs):
-        with gr.Accordion(open=False, label=self.title()):
-            enabled = gr.Checkbox(label='Enabled', value=False)
+        with InputAccordion(False, label=self.title()) as enabled:
             tile_size = gr.Slider(label='Tile Size', minimum=1, maximum=2048, step=1, value=256)
             swap_size = gr.Slider(label='Swap Size', minimum=1, maximum=128, step=1, value=2)
             max_depth = gr.Slider(label='Max Depth', minimum=0, maximum=10, step=1, value=0)

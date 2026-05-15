@@ -38,8 +38,9 @@ class UiLoadsave:
 
         assert not self.finalized_ui
 
-        def apply_field(obj, field, condition=None, init_field=None):
-            key = f"{path}/{field}"
+        def apply_field(obj, field, condition=None, init_field=None, key_field=None):
+            key_field_name = key_field if key_field is not None else field
+            key = f"{path}/{key_field_name}"
 
             if getattr(obj, 'custom_script_source', None) is not None:
                 key = f"customscript/{obj.custom_script_source}/{key}"
@@ -48,9 +49,6 @@ class UiLoadsave:
                 return
 
             saved_value = self.ui_settings.get(key, None)
-
-            if isinstance(obj, gr.Accordion) and isinstance(x, InputAccordion) and field == 'value':
-                field = 'open'
 
             if saved_value is None:
                 self.ui_settings[key] = getattr(obj, field)
@@ -109,7 +107,9 @@ class UiLoadsave:
             if x.accordion.visible:
                 apply_field(x.accordion, 'visible')
             apply_field(x, 'value')
-            apply_field(x.accordion, 'value')
+            # Save/restore the accordion's expanded state under a separate
+            # "/open" key so it does not piggy-back on the checkbox value.
+            apply_field(x.accordion, 'open', key_field='open')
 
         def check_tab_id(tab_id):
             tab_items = list(filter(lambda e: isinstance(e, gr.TabItem), x.children))

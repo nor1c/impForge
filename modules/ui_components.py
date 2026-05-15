@@ -111,6 +111,11 @@ class InputAccordion(gr.Checkbox):
             self.accordion_id = unique_id
         InputAccordion.accordion_id_set.add(self.accordion_id)
 
+        # Allow callers to control the accordion's open state independently of the
+        # checkbox value. Falls back to following the value (legacy behavior).
+        open_state = kwargs.pop('open', value)
+        decoupled = bool(open_state) != bool(value)
+
         kwargs_checkbox = {
             **kwargs,
             "elem_id": f"{self.accordion_id}-checkbox",
@@ -120,12 +125,16 @@ class InputAccordion(gr.Checkbox):
 
         self.change(fn=None, _js='function(checked){ inputAccordionChecked("' + self.accordion_id + '", checked); }', inputs=[self])
 
+        elem_classes = ['input-accordion']
+        if decoupled:
+            elem_classes.append('input-accordion-skip-initial')
+
         kwargs_accordion = {
             **kwargs,
             "elem_id": self.accordion_id,
             "label": kwargs.get('label', 'Accordion'),
-            "elem_classes": ['input-accordion'],
-            "open": value,
+            "elem_classes": elem_classes,
+            "open": open_state,
         }
         self.accordion = gr.Accordion(**kwargs_accordion)
 

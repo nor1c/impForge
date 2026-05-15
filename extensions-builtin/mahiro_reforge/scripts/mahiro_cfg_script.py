@@ -2,6 +2,7 @@ import logging
 import sys
 import gradio as gr
 from modules import scripts, script_callbacks
+from modules.ui_components import InputAccordion
 from mahiro.nodes_mahiro import Mahiro
 from functools import partial
 from typing import Any
@@ -19,9 +20,8 @@ class MahiroCFGScript(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, *args, **kwargs):
-        with gr.Accordion(open=False, label=self.title()):
+        with InputAccordion(self.enabled, label=self.title()) as enabled:
             gr.HTML("<p><i>Toggle Mahiro CFG guidance function.</i></p>")
-            enabled = gr.Checkbox(label="Enable Mahiro CFG", value=self.enabled)
 
         enabled.change(
             lambda x: self.update_enabled(x),

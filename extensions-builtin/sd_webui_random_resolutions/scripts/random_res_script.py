@@ -5,6 +5,7 @@ import json
 import os
 from modules import rng
 from modules.shared import opts
+from modules.ui_components import InputAccordion
 import math
 
 class AspectRatioPreset:
@@ -69,10 +70,8 @@ class Script(scripts.Script):
         return "Random Resolution"
 
     def ui(self, is_img2img):
-        with gr.Accordion("Random Resolution", open=False):
+        with InputAccordion(False, label="Random Resolution") as is_enabled:
             with gr.Column():
-                is_enabled = gr.Checkbox(False, label="Enable random resolution")
-                
                 with gr.Row():
                     model_type = gr.Radio(choices=["SD 1.5", "SDXL"], value="SDXL", label="Model Type")
                     weight_mode = gr.Radio(choices=["Equal Weights", "Favor Smaller", "Favor Larger"], 

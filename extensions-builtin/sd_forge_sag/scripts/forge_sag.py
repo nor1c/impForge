@@ -1,6 +1,7 @@
 import gradio as gr
 
 from modules import scripts
+from modules.ui_components import InputAccordion
 from ldm_patched.contrib.nodes_sag import SelfAttentionGuidance
 
 
@@ -17,8 +18,7 @@ class SAGForForge(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, *args, **kwargs):
-        with gr.Accordion(open=False, label=self.title()):
-            enabled = gr.Checkbox(label='Enabled', value=False)
+        with InputAccordion(False, label=self.title()) as enabled:
             scale = gr.Slider(label='Scale', minimum=-2.0, maximum=5.0, step=0.01, value=0.5)
             blur_sigma = gr.Slider(label='Blur Sigma', minimum=0.0, maximum=10.0, step=0.01, value=2.0)
 

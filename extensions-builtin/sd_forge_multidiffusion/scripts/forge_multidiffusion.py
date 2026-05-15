@@ -1,5 +1,6 @@
 import gradio as gr
 from modules import scripts
+from modules.ui_components import InputAccordion
 
 from lib_multidiffusion.tiled_diffusion import TiledDiffusion
 
@@ -18,8 +19,7 @@ class MultiDiffusionForForge(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, *args, **kwargs):
-        with gr.Accordion(open=False, label=self.title()):
-            enabled = gr.Checkbox(label='Enabled', value=False)
+        with InputAccordion(False, label=self.title()) as enabled:
             method = gr.Radio(label='Method', 
                             choices=['MultiDiffusion', 'Mixture of Diffusers', 'SpotDiffusion'],
                             value='Mixture of Diffusers')

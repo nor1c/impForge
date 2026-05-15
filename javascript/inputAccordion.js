@@ -1,5 +1,6 @@
 function inputAccordionChecked(id, checked) {
     var accordion = gradioApp().getElementById(id);
+    if (!accordion || !accordion.visibleCheckbox) return;
     accordion.visibleCheckbox.checked = checked;
     accordion.onVisibleCheckboxChange();
 }
@@ -10,6 +11,8 @@ function setupAccordion(accordion) {
     var extra = gradioApp().querySelector('#' + accordion.id + "-extra");
     var span = labelWrap.querySelector('span');
     var linked = true;
+    var skipInitial = accordion.classList.contains('input-accordion-skip-initial');
+    var initialSyncDone = !skipInitial;
 
     var isOpen = function() {
         return labelWrap.classList.contains('open');
@@ -39,13 +42,26 @@ function setupAccordion(accordion) {
 
     var visibleCheckbox = document.createElement('INPUT');
     visibleCheckbox.type = 'checkbox';
-    visibleCheckbox.checked = isOpen();
+    // Seed from the underlying gradio checkbox state so we honor decoupled
+    // (value=true, open=false) initial configurations without forcing the
+    // accordion to expand.
+    visibleCheckbox.checked = skipInitial ? gradioCheckbox.checked : isOpen();
     visibleCheckbox.id = accordion.id + "-visible-checkbox";
     visibleCheckbox.className = gradioCheckbox.className + " input-accordion-checkbox";
     span.insertBefore(visibleCheckbox, span.firstChild);
 
     accordion.visibleCheckbox = visibleCheckbox;
     accordion.onVisibleCheckboxChange = function() {
+        if (!initialSyncDone) {
+            initialSyncDone = true;
+            // Don't auto-toggle the accordion on the first sync when the
+            // caller intentionally decoupled value from open state. Just
+            // propagate the value to the underlying gradio checkbox.
+            gradioCheckbox.checked = visibleCheckbox.checked;
+            updateInput(gradioCheckbox);
+            return;
+        }
+
         if (linked && isOpen() != visibleCheckbox.checked) {
             labelWrap.click();
         }

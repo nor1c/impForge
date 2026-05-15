@@ -535,15 +535,29 @@ def add_override_settings_to_paste_fields(paste_fields, override_settings_compon
 
 def connect_paste(button, paste_fields, input_comp, override_settings_component, tabname):
     def paste_func(prompt):
+        loaded_from_last_generation = False
         if not prompt and not shared.cmd_opts.hide_ui_dir_config and not shared.cmd_opts.no_prompt_history:
             filename = os.path.join(data_path, "params.txt")
             try:
                 with open(filename, "r", encoding="utf8") as file:
                     prompt = file.read()
+                    loaded_from_last_generation = bool(prompt)
             except OSError:
                 pass
 
-        return infotext_to_paste_outputs(prompt, paste_fields)
+        outputs = infotext_to_paste_outputs(prompt, paste_fields)
+
+        # When the user clicks the paste / load-last-generation button with no
+        # prompt in the box, we just loaded params.txt from the previous run.
+        # Force the seed back to -1 so the next generation uses a fresh random
+        # seed instead of reusing the previous one.
+        if loaded_from_last_generation:
+            for i, (output_comp, key) in enumerate(paste_fields):
+                if key == "Seed":
+                    outputs[i] = gr.update(value=-1)
+                    break
+
+        return outputs
 
     paste_fields = add_override_settings_to_paste_fields(paste_fields, override_settings_component)
 

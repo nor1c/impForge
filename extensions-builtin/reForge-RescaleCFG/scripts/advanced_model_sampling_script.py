@@ -2,6 +2,7 @@ import logging
 import sys
 import gradio as gr
 from modules import scripts, script_callbacks
+from modules.ui_components import InputAccordion
 from RescaleCFG.nodes_RescaleCFG import RescaleCFG
 from RescaleCFG.nodes_AltRescaleCFG import AltRescaleCFG
 from functools import partial
@@ -22,9 +23,8 @@ class RescaleCFGScript(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, *args, **kwargs):
-        with gr.Accordion(open=False, label=self.title()):
+        with InputAccordion(self.enabled, label=self.title()) as enabled:
             gr.HTML("<p><i>Adjust the settings for RescaleCFG.</i></p>")
-            enabled = gr.Checkbox(label="Enable RescaleCFG", value=self.enabled)
             version = gr.Dropdown(
                 label="RescaleCFG Version",
                 choices=["Normal", "Alternative"],

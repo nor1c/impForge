@@ -5,6 +5,7 @@ import gradio as gr
 import torch
 from modules import scripts, shared
 from modules.shared import opts
+from modules.ui_components import InputAccordion
 from ldm_patched.modules import model_sampling
 from advanced_model_sampling.nodes_model_advanced import (
     ModelSamplingDiscrete, ModelSamplingContinuousEDM, ModelSamplingContinuousV,
@@ -277,10 +278,8 @@ class AdvancedModelSamplingScript(scripts.Script):
             "Shift (Aura Flow)", "Shift", self.aura_flow_shift
         )
 
-        with gr.Accordion(open=False, label=self.title()):
+        with InputAccordion(self.enabled, label=self.title()) as enabled:
             gr.HTML("<p><i>Adjust the settings for Advanced Model Sampling.</i></p>")
-
-            enabled = gr.Checkbox(label="Enable Advanced Model Sampling", value=self.enabled)
 
             sampling_mode = gr.Radio(
                 list(VALID_SAMPLING_MODES),

@@ -1,6 +1,7 @@
 import gradio as gr
 
 from modules import scripts
+from modules.ui_components import InputAccordion
 from ldm_patched.contrib.nodes_model_downscale import PatchModelAddDownscale
 
 
@@ -18,8 +19,7 @@ class KohyaHRFixForForge(scripts.Script):
 
     def ui(self, *args, **kwargs):
         upscale_methods = ["bicubic", "nearest-exact", "bilinear", "area", "bislerp"]
-        with gr.Accordion(open=False, label=self.title()):
-            enabled = gr.Checkbox(label='Enabled', value=False)
+        with InputAccordion(True, open=False, label=self.title()) as enabled:
             block_number = gr.Slider(label='Block Number', value=3, minimum=1, maximum=32, step=1)
             downscale_factor = gr.Slider(label='Downscale Factor', value=2.0, minimum=0.1, maximum=9.0, step=0.001)
             start_percent = gr.Slider(label='Start Percent', value=0.0, minimum=0.0, maximum=1.0, step=0.001)
