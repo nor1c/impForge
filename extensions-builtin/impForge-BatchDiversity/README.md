@@ -2,7 +2,7 @@
 
 Prompt-safe batch diversity extension for Forge/ReForge WebUI.
 
-This extension is intended for SDXL danbooru models such as IllustriousXL. By default it does not change the prompt. It diversifies batch outputs by enforcing independent seeds and perturbing the initial latent noise in a deterministic, metadata-recorded way.
+This extension is intended for SDXL danbooru models such as IllustriousXL. By default it does not change the prompt. It diversifies batch outputs by enforcing independent seeds and perturbing the initial latent noise in a deterministic, metadata-recorded way. The built-in extension is enabled by default through `ui-config.json`.
 
 Optional danbooru framing tags are available, but disabled by default. The built-in default list only contains framing/view/body-orientation tags and avoids lighting, background, style, quality, artist, and setting tags.
 
@@ -31,7 +31,7 @@ The modified noise is normalized back to the original sample's mean and standard
 
 ## Recommended Start
 
-- Enable Batch Diversity: on
+- Batch Diversity: on
 - Mode: Latent + seeds
 - Diversity strength: 0.35
 - Independent seeds: on
@@ -43,9 +43,9 @@ This is the safest default for IllustriousXL-style SDXL models because it does n
 
 ## Settings
 
-### Enable Batch Diversity
+### Batch Diversity
 
-Turns the extension on for the current generation.
+Turns the extension on for the current generation. The activation checkbox is in the accordion header.
 
 If disabled, the extension does nothing.
 

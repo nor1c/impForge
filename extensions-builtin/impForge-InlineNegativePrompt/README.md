@@ -46,10 +46,10 @@ inside the generation process for the current request.
 
 1. Restart the WebUI after installing or adding the extension.
 2. Open the `Inline Negative Prompt` accordion in the txt2img or img2img UI.
-3. Enable `Enable Inline Negative Prompt`.
+3. Keep the `Inline Negative Prompt` checkbox enabled, or enable it if you previously turned it off.
 4. Add `(n:...)` markers to the prompt lines that need per-line negative tags.
 
-The extension is disabled by default.
+The built-in extension is enabled by default through `ui-config.json`.
 
 ## Syntax
 

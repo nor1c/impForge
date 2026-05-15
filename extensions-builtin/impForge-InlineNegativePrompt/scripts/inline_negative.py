@@ -13,9 +13,12 @@ This extension only mutates the per-image prompt arrays
 does not require any changes to core code.
 """
 
+import re
+
 import gradio as gr
 
 from modules import scripts
+from modules.ui_components import InputAccordion
 
 
 MARKER_PREFIX = "n:"
@@ -122,25 +125,24 @@ def _remove_exact_duplicate_tags(prompt, tags_to_remove):
             if depth > 0:
                 depth -= 1
         elif ch == "," and depth == 0:
-            segments.append(prompt[start:i])
+            segments.append((start, i, i + 1, prompt[start:i]))
             start = i + 1
         i += 1
-    segments.append(prompt[start:])
+    segments.append((start, n, n, prompt[start:]))
 
-    kept = []
-    for seg in segments:
+    remove_spans = []
+    for start, end, sep_end, seg in segments:
         if seg.strip().lower() in targets:
-            continue
-        kept.append(seg)
+            remove_spans.append((start, sep_end))
 
-    # Reassemble while preserving original separators between kept segments.
-    if len(kept) == len(segments):
+    if not remove_spans:
         return prompt
 
-    # Drop empty leading/trailing fragments produced by removed tags so we
-    # don't end up with stray commas.
-    cleaned = ", ".join(seg.strip() for seg in kept if seg.strip())
-    return cleaned
+    cleaned = prompt
+    for start, end in reversed(remove_spans):
+        cleaned = cleaned[:start] + cleaned[end:]
+
+    return _tidy_separators(cleaned)
 
 
 def _append_negative(existing, addition):
@@ -194,55 +196,31 @@ def _apply(prompt, negative):
 
 
 def _tidy_separators(prompt):
-    """Collapse the comma/whitespace litter left by removed markers."""
+    """Collapse separator litter left by removed markers without flattening lines."""
 
     if not prompt:
         return prompt
 
-    # Normalise whitespace runs around commas.
-    out = []
-    depth = 0
-    i = 0
-    n = len(prompt)
-    while i < n:
-        ch = prompt[i]
-        if ch == "\\" and i + 1 < n:
-            out.append(prompt[i:i + 2])
-            i += 2
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            if depth > 0:
-                depth -= 1
-        out.append(ch)
-        i += 1
-    text = "".join(out)
+    text = prompt
 
-    # Split at top-level commas, drop empty segments, rejoin.
-    segments = []
-    depth = 0
-    start = 0
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if ch == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            if depth > 0:
-                depth -= 1
-        elif ch == "," and depth == 0:
-            segments.append(text[start:i])
-            start = i + 1
-        i += 1
-    segments.append(text[start:])
+    # Marker removal commonly leaves ", ," on the same line. Collapse only
+    # same-line comma clutter so existing newlines and paragraph spacing remain
+    # untouched.
+    while True:
+        cleaned = re.sub(r",[ \t]*,", ",", text)
+        if cleaned == text:
+            break
+        text = cleaned
 
-    cleaned = ", ".join(seg.strip() for seg in segments if seg.strip())
-    return cleaned
+    # Remove spaces/tabs left directly before line breaks, but preserve the
+    # line breaks themselves.
+    text = re.sub(r"[ \t]+(\r?\n)", r"\1", text)
+
+    # If a removed first tag left a leading comma, drop that comma without
+    # touching blank lines after it.
+    text = re.sub(r"^([ \t]*),[ \t]*", r"\1", text)
+
+    return text
 
 
 class InlineNegativePromptScript(scripts.Script):
@@ -255,15 +233,11 @@ class InlineNegativePromptScript(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
-        with gr.Accordion("Inline Negative Prompt", open=False):
-            enabled = gr.Checkbox(
-                label="Enable Inline Negative Prompt",
-                value=False,
-                info=(
-                    "Move tags wrapped in (n:...) from the positive prompt "
-                    "into the negative prompt at generation time. Useful for "
-                    "per-line negatives in batch prompt-list workflows."
-                ),
+        with InputAccordion(True, label="Inline Negative Prompt", elem_id="inline_negative_prompt_enable", open=False) as enabled:
+            gr.Markdown(
+                "Move tags wrapped in `(n:...)` from the positive prompt into "
+                "the negative prompt at generation time. Useful for per-line "
+                "negatives in batch prompt-list workflows."
             )
             gr.Markdown(
                 "Syntax: `(n:from below)` or `(n:from below, low angle)`. "

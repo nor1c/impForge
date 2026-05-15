@@ -12,7 +12,7 @@ from .template import (
 def _load_kohya_hrfix():
     here = os.path.abspath(os.path.dirname(__file__))
     repo_root = os.path.abspath(os.path.join(here, "..", "..", "..", "..", ".."))
-    target = os.path.join(repo_root, "extensions-builtin", "reForge-KohyaHRFix",
+    target = os.path.join(repo_root, "extensions-builtin", "impForge-KohyaHRFix",
                           "scripts", "kohya_hrfix.py")
     spec = importlib.util.spec_from_file_location("reforge_kohya_hrfix_module", target)
     module = importlib.util.module_from_spec(spec)

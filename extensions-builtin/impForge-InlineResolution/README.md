@@ -32,10 +32,10 @@ the WebUI's base width/height because it has no `(r:...)` marker.
 
 1. Restart the WebUI after installing or adding the extension.
 2. Open the `Inline Resolution` accordion in the txt2img or img2img UI.
-3. Enable `Enable Inline Resolution`.
+3. Keep the `Inline Resolution` checkbox enabled, or enable it if you previously turned it off.
 4. Add `(r:...)` markers to the lines that need a custom resolution.
 
-The extension is disabled by default.
+The built-in extension is enabled by default through `ui-config.json`.
 
 ## Syntax
 
@@ -106,7 +106,7 @@ resolution markers.
 ## Notes
 
 - No core code changes are required.
-- Independent of `sd-webui-inline-negative`; both can be enabled together.
+- Independent of `impForge-InlineNegativePrompt`; both can be enabled together.
 - Does not validate dimension multiples; the underlying model may still
   apply its own internal alignment.
 

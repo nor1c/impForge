@@ -5,6 +5,7 @@ import gradio as gr
 import torch
 
 from modules import scripts
+from modules.ui_components import InputAccordion
 
 
 DEFAULT_DANBOORU_FRAMING_TAGS = """from above
@@ -39,12 +40,8 @@ class BatchDiversityScript(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
-        with gr.Accordion("Batch Diversity", open=False):
-            enabled = gr.Checkbox(
-                label="Enable Batch Diversity",
-                value=False,
-                info="Diversifies batches without changing your prompt by default.",
-            )
+        with InputAccordion(True, label="Batch Diversity", elem_id="batch_diversity_enable", open=False) as enabled:
+            gr.Markdown("Diversifies batches without changing your prompt by default.")
             mode = gr.Radio(
                 label="Mode",
                 choices=["Latent + seeds", "Latent only", "Latent + danbooru framing"],

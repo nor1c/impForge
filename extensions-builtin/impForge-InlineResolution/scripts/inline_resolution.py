@@ -23,6 +23,7 @@ import re
 import gradio as gr
 
 from modules import scripts, rng
+from modules.ui_components import InputAccordion
 
 
 MARKER_PREFIX = "r:"
@@ -104,29 +105,26 @@ def _tidy_separators(prompt):
     if not prompt:
         return prompt
 
-    segments = []
-    depth = 0
-    start = 0
-    i = 0
-    n = len(prompt)
-    while i < n:
-        ch = prompt[i]
-        if ch == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            if depth > 0:
-                depth -= 1
-        elif ch == "," and depth == 0:
-            segments.append(prompt[start:i])
-            start = i + 1
-        i += 1
-    segments.append(prompt[start:])
+    text = prompt
 
-    cleaned = ", ".join(seg.strip() for seg in segments if seg.strip())
-    return cleaned
+    # Marker removal commonly leaves ", ," on the same line. Collapse only
+    # same-line comma clutter so existing newlines and paragraph spacing remain
+    # untouched.
+    while True:
+        cleaned = re.sub(r",[ \t]*,", ",", text)
+        if cleaned == text:
+            break
+        text = cleaned
+
+    # Remove spaces/tabs left directly before line breaks, but preserve the
+    # line breaks themselves.
+    text = re.sub(r"[ \t]+(\r?\n)", r"\1", text)
+
+    # If a removed first tag left a leading comma, drop that comma without
+    # touching blank lines after it.
+    text = re.sub(r"^([ \t]*),[ \t]*", r"\1", text)
+
+    return text
 
 
 def _apply(prompt):
@@ -159,16 +157,12 @@ class InlineResolutionScript(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
-        with gr.Accordion("Inline Resolution", open=False):
-            enabled = gr.Checkbox(
-                label="Enable Inline Resolution",
-                value=False,
-                info=(
-                    "Use (r:width, height) inside a prompt line to override "
-                    "that line's resolution. Lines without (r:...) use the "
-                    "WebUI's base width/height. When mixed sizes are present "
-                    "the extension forces batch size to 1 internally."
-                ),
+        with InputAccordion(True, label="Inline Resolution", elem_id="inline_resolution_enable", open=False) as enabled:
+            gr.Markdown(
+                "Use `(r:width, height)` inside a prompt line to override that "
+                "line's resolution. Lines without `(r:...)` use the WebUI's "
+                "base width/height. When mixed sizes are present the extension "
+                "forces batch size to 1 internally."
             )
             gr.Markdown(
                 "Syntax: `(r:1024, 1380)`, `(r:1380, 1024)`, or `(r:1024x1380)`. "

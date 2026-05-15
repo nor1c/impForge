@@ -15,12 +15,19 @@ There are also some minor config adjustments to improve generation speed, while 
 - [x] Added Batch Diversity extension.
   - Purpose: helps batches generated from the same prompt produce more varied angles, framing, and composition.
   - Default behavior: prompt-safe; it diversifies independent seeds and initial latent noise without adding lighting, background, style, or setting tags.
+  - UI behavior: built-in and enabled by default through `ui-config.json`; the activation checkbox is on the accordion header.
   - Optional behavior: framing tags can be enabled manually when latent-only diversity is not enough.
   - Recommended start: enable `Batch Diversity`, use `Latent + seeds`, set strength around `0.35`, keep framing tags off.
-  - Affected files: `extensions/sd-webui-batch-diversity/scripts/batch_diversity.py`, `extensions/sd-webui-batch-diversity/README.md`.
+  - Affected files: `extensions-builtin/impForge-BatchDiversity/scripts/batch_diversity.py`, `extensions-builtin/impForge-BatchDiversity/README.md`.
 - [x] Added Inline Negative Prompt extension.
   - Purpose: allows per-line negative tags in batch prompt-list workflows by moving `(n:...)` markers from the positive prompt to the matching negative prompt.
   - Example: `from below, low angle, (n:from below)` becomes positive `low angle` and negative `<static negative>, from below`.
+  - Default behavior: built-in and enabled by default through `ui-config.json`; the activation checkbox is on the accordion header.
+  - Affected files: `extensions-builtin/impForge-InlineNegativePrompt/scripts/inline_negative.py`, `extensions-builtin/impForge-InlineNegativePrompt/README.md`.
 - [x] Added Inline Resolution extension.
   - Purpose: allows per-line width/height in batch prompt-list workflows via `(r:width, height)` markers; lines without a marker fall back to the WebUI base resolution.
   - Example: `wide shot, city, (r:1024, 1380)` renders that line at `1024x1380`; the marker is removed before generation.
+  - Default behavior: built-in and enabled by default through `ui-config.json`; the activation checkbox is on the accordion header.
+  - Batching: forces internal `batch_size = 1` when mixed sizes are detected, since one tensor batch cannot contain images of different dimensions.
+  - Hires fix: explicit hires resize values are kept; otherwise `hr_scale` is reapplied to the per-line first-pass resolution.
+  - Affected files: `extensions-builtin/impForge-InlineResolution/scripts/inline_resolution.py`, `extensions-builtin/impForge-InlineResolution/README.md`.
