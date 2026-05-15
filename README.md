@@ -12,9 +12,9 @@ There are also some minor config adjustments to improve generation speed, while 
   [SageAttention and FlashAttention setup](docs/sage_flash_attention_setup.md)<br>
   Refer: [https://github.com/lllyasviel/stable-diffusion-webui-forge/issues/2866](https://github.com/lllyasviel/stable-diffusion-webui-forge/issues/2866)
 - [x] Now you can drop an image and load the metadata directly in the `txt2img` tab, without needing to go through `PNG Info → Send to txt2img`.
-- [x] Added Batch Diversity extension for SDXL/danbooru models.
+- [x] Added Batch Diversity extension.
   - Purpose: helps batches generated from the same prompt produce more varied angles, framing, and composition.
   - Default behavior: prompt-safe; it diversifies independent seeds and initial latent noise without adding lighting, background, style, or setting tags.
-  - Optional behavior: danbooru framing tags can be enabled manually when latent-only diversity is not enough.
-  - Recommended start: enable `Batch Diversity`, use `Latent + seeds`, set strength around `0.35`, keep danbooru framing tags off.
+  - Optional behavior: framing tags can be enabled manually when latent-only diversity is not enough.
+  - Recommended start: enable `Batch Diversity`, use `Latent + seeds`, set strength around `0.35`, keep framing tags off.
   - Affected files: `extensions/sd-webui-batch-diversity/scripts/batch_diversity.py`, `extensions/sd-webui-batch-diversity/README.md`.
