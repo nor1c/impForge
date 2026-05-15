@@ -23,3 +23,9 @@ There are also some minor config adjustments to improve generation speed, while 
   - Example: `from below, low angle, (n:from below)` becomes positive `low angle` and negative `<static negative>, from below`.
   - Duplicate handling: removes only exact top-level duplicate tags from the positive prompt.
   - Affected files: `extensions/sd-webui-inline-negative/scripts/inline_negative.py`, `extensions/sd-webui-inline-negative/README.md`.
+- [x] Added Inline Resolution extension.
+  - Purpose: allows per-line width/height in batch prompt-list workflows via `(r:width, height)` markers; lines without a marker fall back to the WebUI base resolution.
+  - Example: `1girl, city, (r:1024, 1380)` renders that line at `1024x1380`; the marker is removed before generation.
+  - Batching: forces internal `batch_size = 1` when mixed sizes are detected, since one tensor batch cannot contain images of different dimensions.
+  - Hires fix: explicit hires resize values are kept; otherwise `hr_scale` is reapplied to the per-line first-pass resolution.
+  - Affected files: `extensions/sd-webui-inline-resolution/scripts/inline_resolution.py`, `extensions/sd-webui-inline-resolution/README.md`.
