@@ -18,3 +18,8 @@ There are also some minor config adjustments to improve generation speed, while 
   - Optional behavior: framing tags can be enabled manually when latent-only diversity is not enough.
   - Recommended start: enable `Batch Diversity`, use `Latent + seeds`, set strength around `0.35`, keep framing tags off.
   - Affected files: `extensions/sd-webui-batch-diversity/scripts/batch_diversity.py`, `extensions/sd-webui-batch-diversity/README.md`.
+- [x] Added Inline Negative Prompt extension.
+  - Purpose: allows per-line negative tags in batch prompt-list workflows by moving `(n:...)` markers from the positive prompt to the matching negative prompt.
+  - Example: `from below, low angle, (n:from below)` becomes positive `low angle` and negative `<static negative>, from below`.
+  - Duplicate handling: removes only exact top-level duplicate tags from the positive prompt.
+  - Affected files: `extensions/sd-webui-inline-negative/scripts/inline_negative.py`, `extensions/sd-webui-inline-negative/README.md`.
