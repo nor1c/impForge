@@ -33,4 +33,14 @@ set COMMANDLINE_ARGS=^
 @REM  --embeddings-dir %A1111_HOME%\\embeddings ^
 @REM  --lora-dir %A1111_HOME%\\models\\Lora
 
+:: Preflight check: PIL import
+if not defined VENV_DIR set "VENV_DIR=%~dp0venv"
+if exist "%VENV_DIR%\Scripts\python.exe" (
+  "%VENV_DIR%\Scripts\python.exe" -c "from PIL import Image" >nul 2>&1
+  if errorlevel 1 (
+    echo PIL import failed - reinstalling Pillow...
+    "%VENV_DIR%\Scripts\pip.exe" install --force-reinstall pillow==10.4.0
+  )
+)
+
 call webui.bat
