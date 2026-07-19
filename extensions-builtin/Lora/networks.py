@@ -16,9 +16,11 @@ from modules import shared, sd_models, errors, scripts
 from ldm_patched.modules.utils import load_torch_file
 from ldm_patched.modules.sd import load_lora_for_models
 
+last_lora_summary = []
+
 
 @functools.lru_cache(maxsize=5)
-def load_lora_state_dict(filename):
+def load_lora_state_dict(filename, mtime_ns, file_size):
     return load_torch_file(filename, safe_load=True)
 
 
@@ -50,11 +52,19 @@ def purge_networks_from_memory():
 
 
 def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, lbw_ratios=None):
-    global lora_state_dict_cache
+    global last_lora_summary
 
     current_sd = sd_models.model_data.get_sd_model()
     if current_sd is None:
         return
+
+    te_multipliers = te_multipliers or [1.0] * len(names)
+    unet_multipliers = unet_multipliers or list(te_multipliers)
+    dyn_dims = dyn_dims or [None] * len(names)
+    lbw_ratios = lbw_ratios or [None] * len(names)
+    arrays = (te_multipliers, unet_multipliers, dyn_dims, lbw_ratios)
+    if any(len(values) != len(names) for values in arrays):
+        raise ValueError('LoRA names, multipliers, dynamic dimensions, and block weights must have matching lengths.')
 
     unavailable_networks = []
     for name in names:
@@ -66,93 +76,108 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     if unavailable_networks:
         update_available_networks_by_names(unavailable_networks)
 
-    networks_on_disk = [available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None) for name in names]
-    if any(x is None for x in networks_on_disk):
-        list_available_networks()
-        networks_on_disk = [available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None) for name in names]
+    def resolve_networks():
+        return [
+            available_networks.get(name) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name)
+            for name in names
+        ]
 
-    # Resolve per-LoRA block-weight ratios. `lbw_ratios` is a list aligned with
-    # `names`, where each entry is either a 12-tuple of floats, a preset/role
-    # string, or None. If None, we fall back to path-based auto-routing.
-    if lbw_ratios is None:
-        lbw_ratios = [None] * len(names)
-    resolved_ratios = []
-    for i, raw in enumerate(lbw_ratios):
+    networks_on_disk = resolve_networks()
+    if any(item is None for item in networks_on_disk):
+        list_available_networks()
+        networks_on_disk = resolve_networks()
+    missing = [name for name, item in zip(names, networks_on_disk) if item is None]
+    if missing:
+        raise ValueError(f"LoRA files were not found: {', '.join(missing)}")
+
+    resolved = []
+    for network_on_disk, raw in zip(networks_on_disk, lbw_ratios):
+        source = 'flat'
         ratios = None
         if raw is not None:
-            if isinstance(raw, (tuple, list)) and len(raw) in (12, 13):
-                ratios = tuple(float(x) for x in raw)
-                if len(ratios) == 12:
-                    # Expand to 13 by copying BASE into BASE_LATE slot.
-                    ratios = ratios + (ratios[0],)
-            elif isinstance(raw, str):
+            if isinstance(raw, (tuple, list)):
+                ratios = lbw_engine.parse_lbw_spec(','.join(str(value) for value in raw))
+            else:
                 ratios = lbw_engine.parse_lbw_spec(raw)
-        if ratios is None and networks_on_disk[i] is not None:
-            ratios = lbw_engine.infer_ratios_from_path(networks_on_disk[i].filename)
-        resolved_ratios.append(ratios)
-
-    compiled_lora_targets = []
-    all_networks_found = True
-    for a, b, c, r in zip(networks_on_disk, unet_multipliers, te_multipliers, resolved_ratios):
-        if a is not None:
-            # Include ratios in the cache key so changing lbw/role invalidates cache.
-            compiled_lora_targets.append([a.filename, b, c, r])
+            if ratios is None:
+                raise ValueError(f'Invalid block-weight specification for {network_on_disk.name}.')
+            source = 'explicit'
         else:
-            all_networks_found = False
+            ratios = lbw_engine.infer_ratios_from_path(network_on_disk.filename)
+            if ratios is not None:
+                source = 'path'
+        resolved.append((ratios, source))
 
-    if all_networks_found:
-        compiled_lora_targets_hash = str(compiled_lora_targets)
-        if current_sd.current_lora_hash == compiled_lora_targets_hash:
-            return
+    targets = []
+    for item, name, unet, te, (ratios, source) in zip(
+        networks_on_disk, names, unet_multipliers, te_multipliers, resolved
+    ):
+        file_stat = os.stat(item.filename)
+        targets.append((item.filename, file_stat.st_mtime_ns, file_stat.st_size, unet, te, ratios, source, name))
+    target_hash = str([
+        (filename, mtime_ns, file_size, unet, te, ratios, source)
+        for filename, mtime_ns, file_size, unet, te, ratios, source, name in targets
+    ])
+    if not targets:
+        loaded_networks.clear()
+        last_lora_summary = []
+        current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
+        current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
+        current_sd.forge_objects_after_applying_lora = current_sd.forge_objects_original.shallow_copy()
+        current_sd.current_lora_hash = target_hash
+        return
+    if current_sd.current_lora_hash == target_hash:
+        return
 
-    loaded_networks.clear()
-
-    for i, (network_on_disk, name) in enumerate(zip(networks_on_disk, names)):
-        try:
-            net = load_network(name, network_on_disk)
-        except Exception as e:
-            errors.display(e, f"loading network {network_on_disk.filename}")
-            continue
+    pending_networks = []
+    for network_on_disk, name in zip(networks_on_disk, names):
+        net = load_network(name, network_on_disk)
         net.mentioned_name = name
         network_on_disk.read_hash()
-        loaded_networks.append(net)
+        pending_networks.append(net)
 
-    current_sd.current_lora_hash = compiled_lora_targets_hash
-    current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
-    current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
+    working_unet = current_sd.forge_objects_original.unet
+    working_clip = current_sd.forge_objects_original.clip
+    summaries = []
+    try:
+        for filename, mtime_ns, file_size, strength_model, strength_clip, ratios, source, name in targets:
+            lora_sd = load_lora_state_dict(filename, mtime_ns, file_size)
+            before_unet = lbw_engine.snapshot_patches(working_unet.patches) if working_unet is not None else {}
+            before_clip = {}
+            if working_clip is not None:
+                clip_patches = getattr(working_clip, 'patches', None)
+                if clip_patches is None and hasattr(working_clip, 'patcher'):
+                    clip_patches = getattr(working_clip.patcher, 'patches', None)
+                if clip_patches is not None:
+                    before_clip = lbw_engine.snapshot_patches(clip_patches)
 
-    for target in compiled_lora_targets:
-        filename, strength_model, strength_clip, ratios = target
-        lora_sd = load_lora_state_dict(filename)
-
-        # Snapshot the patch dicts BEFORE applying this LoRA, so we can
-        # identify exactly which entries this LoRA added and scale only those.
-        before_unet = lbw_engine.snapshot_patches(current_sd.forge_objects.unet.patches) if current_sd.forge_objects.unet is not None else {}
-        before_clip = {}
-        if current_sd.forge_objects.clip is not None:
-            clip_patches = getattr(current_sd.forge_objects.clip, "patches", None)
-            if clip_patches is None and hasattr(current_sd.forge_objects.clip, "patcher"):
-                clip_patches = getattr(current_sd.forge_objects.clip.patcher, "patches", None)
-            if clip_patches is not None:
-                before_clip = lbw_engine.snapshot_patches(clip_patches)
-
-        current_sd.forge_objects.unet, current_sd.forge_objects.clip = load_lora_for_models(
-            current_sd.forge_objects.unet, current_sd.forge_objects.clip, lora_sd, strength_model, strength_clip,
-            filename=filename)
-
-        # Apply block weights ONLY to the patches this LoRA just added.
-        # Per-LoRA snapshot-diff makes cross-LoRA misalignment impossible.
-        if ratios is not None:
-            lbw_engine.apply_block_weights(
-                current_sd.forge_objects.unet,
-                current_sd.forge_objects.clip,
-                before_unet, before_clip,
-                ratios, lora_name=filename,
+            working_unet, working_clip = load_lora_for_models(
+                working_unet, working_clip, lora_sd, strength_model, strength_clip, filename=filename
             )
+            stats = lbw_engine.apply_block_weights(
+                working_unet, working_clip, before_unet, before_clip, ratios, lora_name=filename
+            ) if ratios is not None else {'scaled': 0, 'passthrough': 0, 'unknown': 0, 'total': 0}
+            preset = next((key for key, value in lbw_engine.SDXL_PRESETS.items() if value == ratios), 'custom' if ratios else 'flat')
+            summaries.append(
+                f'{name}={preset}/{source},TE:{strength_clip:g},UNet:{strength_model:g},'
+                f"scaled:{stats['scaled']},passthrough:{stats['passthrough']},unknown:{stats['unknown']}"
+            )
+    except Exception:
+        loaded_networks.clear()
+        last_lora_summary = []
+        current_sd.current_lora_hash = str([])
+        current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
+        current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
+        current_sd.forge_objects_after_applying_lora = current_sd.forge_objects_original.shallow_copy()
+        raise
 
+    loaded_networks.clear()
+    loaded_networks.extend(pending_networks)
+    current_sd.forge_objects.unet = working_unet
+    current_sd.forge_objects.clip = working_clip
     current_sd.forge_objects_after_applying_lora = current_sd.forge_objects.shallow_copy()
-    return
-
+    current_sd.current_lora_hash = target_hash
+    last_lora_summary = summaries
 
 def allowed_layer_without_weight(layer):
     if isinstance(layer, torch.nn.LayerNorm) and not layer.elementwise_affine:

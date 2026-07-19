@@ -20,33 +20,41 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             p.all_prompts = [x + f"<lora:{additional}:{shared.opts.extra_networks_default_multiplier}>" for x in p.all_prompts]
             params_list.append(extra_networks.ExtraNetworkParams(items=[additional, shared.opts.extra_networks_default_multiplier]))
 
+        def reject_activation(message):
+            networks.load_networks([])
+            raise ValueError(message)
+
         names = []
         te_multipliers = []
         unet_multipliers = []
         dyn_dims = []
         lbw_ratios = []
         for params in params_list:
-            assert params.items
+            if not params.positional:
+                reject_activation('A LoRA tag must include a LoRA name.')
 
-            names.append(params.positional[0])
+            name = params.positional[0]
+            names.append(name)
 
-            te_multiplier = float(params.positional[1]) if len(params.positional) > 1 else 1.0
-            te_multiplier = float(params.named.get("te", te_multiplier))
+            try:
+                te_multiplier = float(params.positional[1]) if len(params.positional) > 1 else 1.0
+                te_multiplier = float(params.named.get('te', te_multiplier))
+                unet_multiplier = float(params.positional[2]) if len(params.positional) > 2 else te_multiplier
+                unet_multiplier = float(params.named.get('unet', unet_multiplier))
+                dyn_dim = int(params.positional[3]) if len(params.positional) > 3 else None
+                dyn_dim = int(params.named['dyn']) if 'dyn' in params.named else dyn_dim
+            except (TypeError, ValueError) as error:
+                reject_activation(f'LoRA {name!r} has an invalid numeric multiplier: {error}')
 
-            unet_multiplier = float(params.positional[2]) if len(params.positional) > 2 else te_multiplier
-            unet_multiplier = float(params.named.get("unet", unet_multiplier))
-
-            dyn_dim = int(params.positional[3]) if len(params.positional) > 3 else None
-            dyn_dim = int(params.named["dyn"]) if "dyn" in params.named else dyn_dim
-
-            # Block-weight / role spec. `lbw=` accepts a preset name, a role
-            # alias, or a 12-value comma list. `role=` / `type=` accept only
-            # role aliases. `lbw=` wins if both are present. Passed through as
-            # a string; networks.load_networks resolves it into a 12-tuple.
-            lbw_spec = params.named.get("lbw") or params.named.get("w")
-            if lbw_spec is None:
-                role_spec = params.named.get("role") or params.named.get("type")
-                lbw_spec = role_spec  # may still be None -> path-based fallback
+            lbw_spec = params.named.get('lbw') or params.named.get('w')
+            role_spec = params.named.get('role') or params.named.get('type')
+            if lbw_spec is not None and networks.lbw_engine.parse_lbw_spec(lbw_spec) is None:
+                reject_activation(f'LoRA {name!r} has an invalid lbw value {lbw_spec!r}. Use a preset or exactly 12 or 13 finite numbers.')
+            if lbw_spec is None and role_spec is not None:
+                if networks.lbw_engine.parse_role(role_spec) is None:
+                    valid_roles = 'char, char_strong, char_max, style, style_pure'
+                    reject_activation(f'LoRA {name!r} has an unknown role {role_spec!r}. Valid roles: {valid_roles}.')
+                lbw_spec = role_spec
 
             te_multipliers.append(te_multiplier)
             unet_multipliers.append(unet_multiplier)
@@ -54,6 +62,9 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             lbw_ratios.append(lbw_spec)
 
         networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims, lbw_ratios=lbw_ratios)
+
+        if getattr(networks, 'last_lora_summary', None):
+            p.extra_generation_params['LoRA role split'] = '; '.join(networks.last_lora_summary)
 
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):

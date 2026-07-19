@@ -191,19 +191,31 @@ def parse_prompt(prompt):
     return prompt, res
 
 
+def lora_data_signature(extra_data):
+    params = list(extra_data.get('lora', [])) + list(extra_data.get('lyco', []))
+    return tuple(tuple(param.items) for param in params)
+
 def parse_prompts(prompts):
     res = []
     extra_data = None
+    extra_signature = None
 
-    for prompt in prompts:
+    for index, prompt in enumerate(prompts):
         updated_prompt, parsed_extra_data = parse_prompt(prompt)
+        parsed_signature = lora_data_signature(parsed_extra_data)
 
         if extra_data is None:
             extra_data = parsed_extra_data
+            extra_signature = parsed_signature
+        elif parsed_signature != extra_signature:
+            raise ValueError(
+                f'Prompt {index + 1} uses a different extra-network stack. '
+                'All prompts in one batch must use identical LoRA names, strengths, and roles.'
+            )
 
         res.append(updated_prompt)
 
-    return res, extra_data
+    return res, extra_data or defaultdict(list)
 
 
 def get_user_metadata(filename, lister=None):

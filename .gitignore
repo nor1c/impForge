@@ -65,6 +65,8 @@ webui-user-8160-gpu3-nopass_fp8.sh
 !webui-user.bat
 !webui-user.sh
 
-CLUADE.md
+CLAUDE.md
 AGENTS.md
 AGENTS.override.md
+.mimocode
+.pi-subagents
