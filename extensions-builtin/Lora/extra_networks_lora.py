@@ -1,4 +1,4 @@
-from modules import extra_networks, shared
+from modules import extra_networks, shared, errors
 import networks
 
 
@@ -29,6 +29,7 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
         unet_multipliers = []
         dyn_dims = []
         lbw_ratios = []
+        step_windows = []
         for params in params_list:
             if not params.positional:
                 reject_activation('A LoRA tag must include a LoRA name.')
@@ -56,12 +57,22 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
                     reject_activation(f'LoRA {name!r} has an unknown role {role_spec!r}. Valid roles: {valid_roles}.')
                 lbw_spec = role_spec
 
+            try:
+                step_window = networks.lbw_engine.parse_step_window(
+                    params.named.get('start'),
+                    params.named.get('stop'),
+                    params.named.get('step'),
+                )
+            except ValueError as error:
+                reject_activation(f'LoRA {name!r} has an invalid step window: {error}')
+
             te_multipliers.append(te_multiplier)
             unet_multipliers.append(unet_multiplier)
             dyn_dims.append(dyn_dim)
             lbw_ratios.append(lbw_spec)
+            step_windows.append(step_window)
 
-        networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims, lbw_ratios=lbw_ratios)
+        networks.load_networks(names, te_multipliers, unet_multipliers, dyn_dims, lbw_ratios=lbw_ratios, step_windows=step_windows)
 
         if getattr(networks, 'last_lora_summary', None):
             p.extra_generation_params['LoRA role split'] = '; '.join(networks.last_lora_summary)
@@ -83,6 +94,17 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
                 p.extra_generation_params["Lora hashes"] = ', '.join(f'{k}: {v}' for k, v in p.lora_hashes.items())
 
     def deactivate(self, p):
+        # A stop= window (or an interrupted start= run) can leave scheduled
+        # patches muted. The patched UNet is cached for the next generation, so
+        # put the baked weights back into their unscheduled state here.
+        forge_objects = getattr(getattr(p, 'sd_model', None), 'forge_objects', None)
+        unet = getattr(forge_objects, 'unet', None)
+        if unet is not None:
+            try:
+                networks.lbw_schedule.restore(unet)
+            except Exception:
+                errors.report('Failed to restore scheduled LoRA weights', exc_info=True)
+
         if self.errors:
             p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
 

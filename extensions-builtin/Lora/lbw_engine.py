@@ -17,8 +17,8 @@ CLIP_LATE_FRACTION = 1.0 / 3.0
 # The character presets used to push BASE above 1.0 to strengthen identity, but
 # that amplified the dataset's habitual posing along with it, so prompt wording
 # had to fight an over-weighted reading of itself. Text-encoder conditioning is
-# computed once before sampling rather than per step, so the preset is the only
-# place to address it. BASE is therefore held below 1.0 while
+# computed once before sampling, so a step window cannot relieve this path; the
+# preset is the only place to address it. BASE is therefore held below 1.0 while
 # BASE_LATE keeps its original value, so trigger-word binding is unchanged.
 SDXL_PRESETS = {
     'ALL': (1.0,) * 13,
@@ -323,6 +323,120 @@ def apply_block_weights(unet_patcher, clip_patcher, before_unet, before_clip, ra
         logger.warning('[LBW] %s has unsupported patch keys: %s', os.path.basename(str(lora_name)), ', '.join(stats['unknown_keys']))
     return stats
 
+
+def parse_step_window(start_spec, stop_spec, step_spec=None):
+    """Resolve a LoRA's active sampling-step window.
+
+    Returns ``(start, stop, is_fraction)`` where start is inclusive, stop is
+    exclusive, and ``None`` means unbounded on that side.
+
+    Composition is decided during the first few steps at high sigma, while
+    identity and fine detail are built later. Delaying a character LoRA with
+    ``start=`` therefore frees up the composition phase without weakening the
+    identity, which lowering the strength or the deep-block weights would do.
+
+    Bounds are written either as whole steps (``start=4``) or as a fraction of
+    the run (``start=0.15``). Fractions are the portable form: a run is resampled
+    at a different step count during hires fix, so a fixed step index calibrated
+    for the first pass means something different there. Both bounds of one tag
+    must use the same form, otherwise the intent is ambiguous.
+    """
+    if step_spec is not None:
+        text = str(step_spec).strip()
+        if not text:
+            raise ValueError('step= must not be empty.')
+        if '-' not in text:
+            raise ValueError(f'step={text!r} must use the form start-stop.')
+        start_spec, stop_spec = text.split('-', 1)
+
+    def coerce(value, label):
+        """Returns (number, is_fraction) or (None, None) when unset."""
+        if value is None:
+            return None, None
+        text = str(value).strip()
+        if not text:
+            return None, None
+        if '.' in text:
+            try:
+                number = float(text)
+            except ValueError:
+                raise ValueError(f'{label}={text!r} must be a step number or a fraction.') from None
+            if not math.isfinite(number):
+                raise ValueError(f'{label}={text!r} must be a finite fraction.')
+            if not 0.0 <= number <= 1.0:
+                raise ValueError(f'{label}={text!r} must be a fraction between 0 and 1.')
+            return number, True
+        try:
+            number = int(text)
+        except ValueError:
+            raise ValueError(f'{label}={text!r} must be a whole step number or a fraction.') from None
+        if number < 0:
+            raise ValueError(f'{label}={text!r} must not be negative.')
+        return number, False
+
+    start, start_is_fraction = coerce(start_spec, 'start')
+    stop, stop_is_fraction = coerce(stop_spec, 'stop')
+
+    forms = {flag for flag in (start_is_fraction, stop_is_fraction) if flag is not None}
+    if len(forms) > 1:
+        raise ValueError('start and stop must both be step numbers or both be fractions.')
+    is_fraction = bool(forms and forms.pop())
+
+    if start is not None and stop is not None and stop <= start:
+        raise ValueError(f'stop={stop:g} must be greater than start={start:g}.')
+    if stop is None and (start is None or start == 0):
+        return None
+    return (start, stop, is_fraction)
+
+
+def resolve_window_bounds(window, total_steps):
+    """Convert a window to concrete step indices for a run of ``total_steps``.
+
+    Fractions scale to whatever step count the current pass uses, so one tag
+    behaves consistently across the base pass and hires fix. Returns
+    ``(start, stop)`` as step indices, or ``None`` when a fractional window
+    cannot be resolved because the step count is unknown.
+    """
+    if window is None:
+        return None
+    start, stop, is_fraction = window
+    if not is_fraction:
+        return (start, stop)
+    if not total_steps:
+        return None
+    def to_index(value):
+        return None if value is None else int(round(value * total_steps))
+    return (to_index(start), to_index(stop))
+
+
+def window_is_active(window, step, total_steps=None):
+    """Whether a scheduled patch should be applied at ``step``.
+
+    Fails open: an unresolvable window counts as active, so a missing step count
+    can never silently mute a LoRA the user asked for.
+    """
+    bounds = resolve_window_bounds(window, total_steps)
+    if bounds is None:
+        return True
+    start, stop = bounds
+    if start is not None and step < start:
+        return False
+    if stop is not None and step >= stop:
+        return False
+    return True
+
+
+def window_is_fractional(window):
+    return bool(window and window[2])
+
+
+def format_window(window):
+    """Human-readable window for logs and generation metadata."""
+    if window is None:
+        return ''
+    start, stop, is_fraction = window
+    fmt = (lambda value: f'{value:g}') if is_fraction else (lambda value: f'{value:d}')
+    return f"{'' if start is None else fmt(start)}-{'' if stop is None else fmt(stop)}"
 
 # Each LoRA is capped at 1.0 individually, so a warning is only meaningful for
 # what stacking adds on top. A character plus one style LoRA at sane strengths

@@ -8,6 +8,7 @@ import lora_patches
 import functools
 import network
 import lbw_engine
+import lbw_schedule
 
 import torch
 from typing import Union
@@ -70,7 +71,7 @@ def purge_networks_from_memory():
     pass
 
 
-def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, lbw_ratios=None):
+def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, lbw_ratios=None, step_windows=None):
     global last_lora_summary, last_stack_peaks
 
     current_sd = sd_models.model_data.get_sd_model()
@@ -81,9 +82,10 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     unet_multipliers = unet_multipliers or list(te_multipliers)
     dyn_dims = dyn_dims or [None] * len(names)
     lbw_ratios = lbw_ratios or [None] * len(names)
-    arrays = (te_multipliers, unet_multipliers, dyn_dims, lbw_ratios)
+    step_windows = step_windows or [None] * len(names)
+    arrays = (te_multipliers, unet_multipliers, dyn_dims, lbw_ratios, step_windows)
     if any(len(values) != len(names) for values in arrays):
-        raise ValueError('LoRA names, multipliers, dynamic dimensions, and block weights must have matching lengths.')
+        raise ValueError('LoRA names, multipliers, dynamic dimensions, block weights, and step windows must have matching lengths.')
 
     unavailable_networks = []
     for name in names:
@@ -128,19 +130,20 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         resolved.append((ratios, source))
 
     targets = []
-    for item, name, unet, te, (ratios, source) in zip(
-        networks_on_disk, names, unet_multipliers, te_multipliers, resolved
+    for item, name, unet, te, (ratios, source), window in zip(
+        networks_on_disk, names, unet_multipliers, te_multipliers, resolved, step_windows
     ):
         file_stat = os.stat(item.filename)
-        targets.append((item.filename, file_stat.st_mtime_ns, file_stat.st_size, unet, te, ratios, source, name))
+        targets.append((item.filename, file_stat.st_mtime_ns, file_stat.st_size, unet, te, ratios, source, name, window))
     target_hash = str([
-        (filename, mtime_ns, file_size, unet, te, ratios, source)
-        for filename, mtime_ns, file_size, unet, te, ratios, source, name in targets
+        (filename, mtime_ns, file_size, unet, te, ratios, source, window)
+        for filename, mtime_ns, file_size, unet, te, ratios, source, name, window in targets
     ])
     if not targets:
         loaded_networks.clear()
         last_lora_summary = []
         last_stack_peaks = ''
+        lbw_schedule.clear(current_sd.forge_objects_original.unet)
         current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
         current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
         current_sd.forge_objects_after_applying_lora = current_sd.forge_objects_original.shallow_copy()
@@ -158,10 +161,14 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
     working_unet = current_sd.forge_objects_original.unet
     working_clip = current_sd.forge_objects_original.clip
+    # Schedules live on the shared model object so they survive the patcher
+    # clones taken during sampling; drop any schedule from the previous stack
+    # before recording a new one.
+    lbw_schedule.clear(working_unet)
     ceiling = lbw_engine.EFFECTIVE_CEILING if getattr(shared.opts, 'lora_clamp_effective_weight', True) else None
     summaries = []
     try:
-        for filename, mtime_ns, file_size, strength_model, strength_clip, ratios, source, name in targets:
+        for filename, mtime_ns, file_size, strength_model, strength_clip, ratios, source, name, window in targets:
             lora_sd = load_lora_state_dict(filename, mtime_ns, file_size)
             before_unet = lbw_engine.snapshot_patches(working_unet.patches) if working_unet is not None else {}
             before_clip = {}
@@ -179,15 +186,21 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                 working_unet, working_clip, before_unet, before_clip, ratios,
                 lora_name=filename, ceiling=ceiling,
             ) if ratios is not None else lbw_engine.new_stats()
+            # Step windows only gate UNet patches. Text-encoder conditioning is
+            # computed once before sampling starts, so it cannot follow a step
+            # window and keeps the requested strength.
+            lbw_schedule.collect(working_unet, before_unet, window, label=name)
             preset = next((key for key, value in lbw_engine.SDXL_PRESETS.items() if value == ratios), 'custom' if ratios else 'flat')
+            window_note = f',steps:{lbw_engine.format_window(window)}' if window is not None else ''
             summaries.append(
-                f'{name}={preset}/{source},TE:{strength_clip:g},UNet:{strength_model:g},'
+                f'{name}={preset}/{source},TE:{strength_clip:g},UNet:{strength_model:g}{window_note},'
                 f"scaled:{stats['scaled']},folded:{stats['folded']},passthrough:{stats['passthrough']},unknown:{stats['unknown']}"
             )
     except Exception:
         loaded_networks.clear()
         last_lora_summary = []
         last_stack_peaks = ''
+        lbw_schedule.clear(current_sd.forge_objects_original.unet)
         current_sd.current_lora_hash = str([])
         current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
         current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
@@ -198,11 +211,11 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     loaded_networks.extend(pending_networks)
     lbw_engine.log_stack_load([
         (name, strength_model, strength_clip, ratios)
-        for _f, _m, _s, strength_model, strength_clip, ratios, _src, name in targets
+        for _f, _m, _s, strength_model, strength_clip, ratios, _src, name, _w in targets
     ], ceiling=ceiling)
     _record_stack_peaks([
         (name, strength_model, strength_clip, ratios)
-        for _f, _m, _s, strength_model, strength_clip, ratios, _src, name in targets
+        for _f, _m, _s, strength_model, strength_clip, ratios, _src, name, _w in targets
     ], ceiling)
     current_sd.forge_objects.unet = working_unet
     current_sd.forge_objects.clip = working_clip

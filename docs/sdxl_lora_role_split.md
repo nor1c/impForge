@@ -36,7 +36,7 @@ Valid roles are `char`, `char_strong`, `char_max`, `style`, and `style_pure`. Ra
 
 All prompts within one processing batch must use the same LoRA names, strengths, and roles because the model has one active LoRA patch stack at a time. Split prompts with different stacks into separate jobs.
 
-Generation metadata includes the resolved preset, source, TE and UNet strength, and patch coverage. Patch keys are reported as `scaled` (the block has its own preset slot), `folded` (a block without its own slot), `passthrough` (outside the UNet blocks, for example `time_embed`), and `unknown`. A high unknown count means the LoRA key layout needs additional engine mapping before role weighting can reliably isolate it.
+Generation metadata includes the resolved preset, source, TE and UNet strength, the step window, and patch coverage. Patch keys are reported as `scaled` (the block has its own preset slot), `folded` (a block without its own slot), `passthrough` (outside the UNet blocks, for example `time_embed`), and `unknown`. A high unknown count means the LoRA key layout needs additional engine mapping before role weighting can reliably isolate it.
 
 ### Effective Weight and the Text Encoder
 
@@ -53,7 +53,7 @@ Two changes address this.
 | `BASE` | CLIP-L 0-7, CLIP-G 0-20 | Reads the prompt semantically — context, framing, pose wording |
 | `BASE_LATE` | CLIP-L 8-11, CLIP-G 21-31 | Where a trigger word binds to identity |
 
-Amplifying `BASE` strengthened the LoRA's reading of the prompt along with its dataset associations, so pose wording had to fight an over-weighted interpretation of itself. Text-encoder conditioning is computed once before sampling rather than per step, so the preset is the only place to address it.
+Amplifying `BASE` strengthened the LoRA's reading of the prompt along with its dataset associations, so pose wording had to fight an over-weighted interpretation of itself. Text-encoder conditioning is computed once before sampling, so a step window cannot relieve this path — the preset is the only place to address it.
 
 | Preset | `BASE` was | now | `BASE_LATE` |
 | --- | --- | --- | --- |
@@ -71,3 +71,52 @@ A folded block takes the **mean of its resolution level's slots**, capped at 1.0
 
 Blocks that own a slot are unaffected and keep their above-1.0 preset weights.
 
+## Step Windows
+
+Composition is decided during the first few high-sigma steps; identity, face, and fine detail are built afterwards. A character LoRA that is active from step 0 therefore competes with the prompt over the pose.
+
+Lowering the strength or pushing the deep-block weights down does not separate the two, because in SDXL the deep blocks (`IN07`, `IN08`, `M00`) carry identity and layout together, so attenuating them costs identity by as much as it frees up composition.
+
+Delaying the LoRA in time avoids that trade-off. The composition phase runs without the LoRA, then the LoRA applies at full strength for the remaining steps:
+
+```text
+<lora:character_lora:0.9:0.9:role=char:start=0.15>
+```
+
+`start=` is the first step the LoRA applies to, `stop=` is the first step it no longer applies to, and `step=start-stop` sets both:
+
+```text
+<lora:character_lora:0.9:0.9:role=char:stop=0.6>
+<lora:character_lora:0.9:0.9:role=char:step=0.15-0.85>
+```
+
+Start at `start=0.15`. If identity weakens, lower it rather than raising the strength. If the pose still does not respond, raise it. `start=0` is the same as no window.
+
+### Fractions vs Absolute Steps
+
+A bound containing a decimal point is a fraction of the current pass; a whole number is a step index. Fractions are recommended because the step counter restarts for every sampling run and hires fix resamples at a different step count, so `start=0.15` lands proportionally in both while `start=4` means something different in each. Both bounds of one tag must use the same form; mixing them is rejected.
+
+### Behaviour Across Passes
+
+| Pass | Behaviour |
+| --- | --- |
+| Base txt2img | Windows apply as written. |
+| Hires fix | Fractional windows scale to the pass. Absolute windows are skipped and the LoRA runs at full strength, since a step index calibrated for the base pass would delay it again during the pass that builds final detail. |
+| ADetailer | Windows are skipped. Face inpainting does not decide composition, so muting the character LoRA there would only remove identity from the fix. |
+| Lowvram | Windows are declined with a warning. Weights are patched per forward pass from a captured patch list rather than baked once, so muting is not reliably observed. |
+
+Step windows gate UNet patches only. Text-encoder conditioning is computed once before sampling begins, so it cannot follow a step window and keeps the requested TE strength.
+
+Crossing a window boundary restores the affected weights from the patcher backup and re-bakes them. For a large LoRA this is a brief pause on that step, logged when it exceeds a second.
+
+Each LoRA is capped at 1.0 individually, but a stack is not: several LoRAs contributing to the same block still add up. A character plus one style LoRA lands around 1.2-1.3 and works normally, so the warning fires above 1.35 — roughly a full extra LoRA's worth of weight on one block. That is the point where prompt-driven pose usually stops responding.
+
+Every load also logs the peak effective weight per LoRA, so the gap between the strength written in the prompt and the weight applied stays visible:
+
+```text
+[LBW] character.safetensors: written UNet:0.9 TE:0.9 -> peak effective 1.00 at IN04
+```
+
+Increase character strength one step at a time. If `char_strong` or `char_max` adds artifacts without restoring the detail, more weight is not the fix. Test the character LoRA alone at its training resolution and use fixed seeds when comparing it with a style LoRA.
+
+This cannot perfectly remove concepts baked into a LoRA, but it reduces style-LoRA content bleed and character-LoRA style bleed.

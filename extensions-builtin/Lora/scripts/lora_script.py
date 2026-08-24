@@ -7,6 +7,8 @@ import network
 import networks
 import lora  # noqa:F401
 import lora_patches
+import lbw_engine
+import lbw_schedule
 import extra_networks_lora
 import ui_extra_networks_lora
 from modules import script_callbacks, ui_extra_networks, extra_networks, shared
@@ -14,6 +16,47 @@ from modules import script_callbacks, ui_extra_networks, extra_networks, shared
 
 def unload():
     networks.originals.undo()
+
+
+def apply_lora_step_windows(params):
+    """Gate step-limited LoRA patches for the step about to be denoised.
+
+    Registered unconditionally, but returns immediately unless a LoRA in the
+    current stack declared start=/stop=/step=.
+
+    The step counter restarts at zero for every sampling run, so a window has to
+    be checked against the pass it is running in:
+
+    * ADetailer inpaints a detected face in its own img2img run. That run does
+      not decide composition, so muting the character LoRA there only removes
+      identity from the fix. Windows are skipped entirely.
+    * Hires fix resamples the image at a different step count. A fractional
+      window scales to it correctly, but an absolute step index was calibrated
+      for the first pass and would delay the LoRA again during the pass that
+      builds the final detail, so absolute windows are skipped.
+    """
+    forge_objects = getattr(getattr(shared, 'sd_model', None), 'forge_objects', None)
+    unet = getattr(forge_objects, 'unet', None)
+    if unet is None:
+        return
+    schedule = lbw_schedule.get_schedule(unet)
+    if schedule is None:
+        return
+
+    p = getattr(getattr(params, 'denoiser', None), 'p', None)
+
+    # ADetailer sets both flags on the inner img2img it builds per detection.
+    if getattr(p, '_ad_inner', False) or getattr(p, '_ad_disabled', False):
+        lbw_schedule.restore(unet)
+        return
+
+    if getattr(p, 'is_hr_pass', False):
+        windows = {window for records in schedule.entries.values() for _i, window, _s in records}
+        if any(not lbw_engine.window_is_fractional(window) for window in windows):
+            lbw_schedule.restore(unet)
+            return
+
+    lbw_schedule.update(unet, params.sampling_step, params.total_sampling_steps)
 
 
 def before_ui():
@@ -30,6 +73,7 @@ script_callbacks.on_model_loaded(networks.assign_network_names_to_compvis_module
 script_callbacks.on_script_unloaded(unload)
 script_callbacks.on_before_ui(before_ui)
 script_callbacks.on_infotext_pasted(networks.infotext_pasted)
+script_callbacks.on_cfg_denoiser(apply_lora_step_windows, name='lora_step_windows')
 
 
 shared.options_templates.update(shared.options_section(('extra_networks', "Extra Networks"), {

@@ -72,6 +72,26 @@ Effective weight is now capped at 1.0, so the number in the prompt is the number
 
 The generation metadata records what actually ran, for example `LoRA effective peak: char:1.00@IN04`.
 
+### Step Windows for Pose Control
+
+If poses always come out generic and complex poses never work, the character LoRA is usually competing with the prompt over the composition. Composition is decided in the first few steps; identity and detail are built afterwards. Delay the LoRA instead of weakening it:
+
+```text
+<lora:character:0.9:0.9:role=char:start=0.15>
+```
+
+The first 15% of the run forms the composition from the prompt alone, then the LoRA applies at full strength for the rest, so identity is not sacrificed. Start at `0.15` and adjust from there: lower it if identity weakens, raise it if the pose still does not respond.
+
+Bounds are written either as a fraction of the run (`start=0.15`) or as whole steps (`start=4`). Fractions are recommended, because hires fix resamples at a different step count and a fraction scales to it while a fixed step index does not. `stop=` and `step=start-stop` are also accepted; both bounds of one tag must use the same form.
+
+Behaviour across passes:
+
+- **Hires fix** — fractional windows scale to the pass. Absolute windows are skipped there and the LoRA runs at full strength, since a step index calibrated for the base pass would delay it again during the pass that builds final detail.
+- **ADetailer** — windows are skipped entirely. Face inpainting does not decide composition, so muting the character LoRA there would only remove identity from the fix.
+- **Lowvram** — windows are declined with a warning, because weights are patched per forward pass instead of baked once.
+
+Step windows apply to UNet patches only; text-encoder conditioning is computed before sampling starts and keeps its requested strength. Crossing a window boundary re-bakes the affected weights, which shows up as a brief pause on that step.
+
 ### Batch Restriction
 
 Every prompt in one processing batch must use the same LoRA names, strengths, and roles. Run prompts with different LoRA stacks as separate jobs. This prevents later prompts from silently using the first prompt's LoRA configuration.

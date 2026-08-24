@@ -128,9 +128,9 @@ CHARACTER_PRESETS = ('CHAR_SDXL', 'CHAR_SDXL_STRONG', 'CHAR_SDXL_MAX')
 def test_base_slot_is_held_below_full_strength(preset):
     """BASE reads the prompt semantically, so it must not be amplified.
 
-    Text-encoder conditioning is computed once before sampling rather than per
-    step. Amplifying it made the LoRA's dataset posing outweigh the wording of
-    the prompt.
+    Text-encoder conditioning is computed once before sampling, so a step window
+    cannot relieve this path. Amplifying it made the LoRA's dataset posing
+    outweigh the wording of the prompt.
     """
     base = lbw_engine.SDXL_PRESETS[preset][lbw_engine.SDXL_BLOCK_ORDER.index('BASE')]
     assert base < 1.0, f'{preset} BASE is {base}'
