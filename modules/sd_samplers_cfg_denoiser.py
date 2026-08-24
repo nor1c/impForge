@@ -187,13 +187,17 @@ class CFGDenoiser(torch.nn.Module):
                 if shared.opts.s_min_uncond_all:
                     self.p.extra_generation_params["NGMS all steps"] = shared.opts.s_min_uncond_all
 
-        # Existing skip_early_cond logic
-        if not skip_uncond:
-            if self.step < shared.opts.skip_early_cond:
+        # skip_early_cond is a fraction of total steps (0=skip none, 1=skip all).
+        # The previous integer comparison (self.step < skip_early_cond) selected
+        # the same steps as the ratio branch below it for every fractional value,
+        # so it only changed whether the infotext key was written on those steps.
+        # Folded into one branch, plus a guard for total_steps, which stays None
+        # until launch_sampling sets it.
+        skip_early_cond = shared.opts.skip_early_cond
+        if not skip_uncond and skip_early_cond > 0. and self.total_steps:
+            if self.step / self.total_steps <= skip_early_cond:
                 skip_uncond = True
-            elif shared.opts.skip_early_cond != 0. and self.step / self.total_steps <= shared.opts.skip_early_cond:
-                skip_uncond = True
-                self.p.extra_generation_params["Skip Early CFG"] = shared.opts.skip_early_cond
+                self.p.extra_generation_params["Skip Early CFG"] = skip_early_cond
 
         # Implement padding logic
         self.padded_cond_uncond = False
