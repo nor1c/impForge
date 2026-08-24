@@ -66,6 +66,11 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
         if getattr(networks, 'last_lora_summary', None):
             p.extra_generation_params['LoRA role split'] = '; '.join(networks.last_lora_summary)
 
+        # The applied weight is strength x preset ratio, so it is rarely the
+        # number written in the prompt. Record what actually ran.
+        if getattr(networks, 'last_stack_peaks', ''):
+            p.extra_generation_params['LoRA effective peak'] = networks.last_stack_peaks
+
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):
                 p.lora_hashes = {}
@@ -82,4 +87,3 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
 
             self.errors.clear()
-            

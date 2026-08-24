@@ -17,6 +17,25 @@ from ldm_patched.modules.utils import load_torch_file
 from ldm_patched.modules.sd import load_lora_for_models
 
 last_lora_summary = []
+last_stack_peaks = ''
+"""Peak effective weight per LoRA, kept so it can be reported again.
+
+load_networks() is skipped entirely when a generation reuses the previous
+LoRA configuration, so anything logged only from inside it disappears from the
+second generation onwards. Holding the summary here lets the caller surface it
+either way.
+"""
+
+
+def _record_stack_peaks(entries, ceiling):
+    global last_stack_peaks
+    parts = []
+    for name, unet_strength, te_strength, ratios in entries:
+        weights = lbw_engine.effective_weights(unet_strength, te_strength, ratios, ceiling)
+        block = max(weights, key=weights.get)
+        parts.append(f'{name}:{weights[block]:.2f}@{block}')
+    last_stack_peaks = ', '.join(parts)
+    return last_stack_peaks
 
 
 @functools.lru_cache(maxsize=5)
@@ -52,7 +71,7 @@ def purge_networks_from_memory():
 
 
 def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, lbw_ratios=None):
-    global last_lora_summary
+    global last_lora_summary, last_stack_peaks
 
     current_sd = sd_models.model_data.get_sd_model()
     if current_sd is None:
@@ -121,6 +140,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     if not targets:
         loaded_networks.clear()
         last_lora_summary = []
+        last_stack_peaks = ''
         current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
         current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
         current_sd.forge_objects_after_applying_lora = current_sd.forge_objects_original.shallow_copy()
@@ -138,6 +158,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
     working_unet = current_sd.forge_objects_original.unet
     working_clip = current_sd.forge_objects_original.clip
+    ceiling = lbw_engine.EFFECTIVE_CEILING if getattr(shared.opts, 'lora_clamp_effective_weight', True) else None
     summaries = []
     try:
         for filename, mtime_ns, file_size, strength_model, strength_clip, ratios, source, name in targets:
@@ -155,16 +176,18 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                 working_unet, working_clip, lora_sd, strength_model, strength_clip, filename=filename
             )
             stats = lbw_engine.apply_block_weights(
-                working_unet, working_clip, before_unet, before_clip, ratios, lora_name=filename
-            ) if ratios is not None else {'scaled': 0, 'passthrough': 0, 'unknown': 0, 'total': 0}
+                working_unet, working_clip, before_unet, before_clip, ratios,
+                lora_name=filename, ceiling=ceiling,
+            ) if ratios is not None else lbw_engine.new_stats()
             preset = next((key for key, value in lbw_engine.SDXL_PRESETS.items() if value == ratios), 'custom' if ratios else 'flat')
             summaries.append(
                 f'{name}={preset}/{source},TE:{strength_clip:g},UNet:{strength_model:g},'
-                f"scaled:{stats['scaled']},passthrough:{stats['passthrough']},unknown:{stats['unknown']}"
+                f"scaled:{stats['scaled']},folded:{stats['folded']},passthrough:{stats['passthrough']},unknown:{stats['unknown']}"
             )
     except Exception:
         loaded_networks.clear()
         last_lora_summary = []
+        last_stack_peaks = ''
         current_sd.current_lora_hash = str([])
         current_sd.forge_objects.unet = current_sd.forge_objects_original.unet
         current_sd.forge_objects.clip = current_sd.forge_objects_original.clip
@@ -173,6 +196,14 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
     loaded_networks.clear()
     loaded_networks.extend(pending_networks)
+    lbw_engine.log_stack_load([
+        (name, strength_model, strength_clip, ratios)
+        for _f, _m, _s, strength_model, strength_clip, ratios, _src, name in targets
+    ], ceiling=ceiling)
+    _record_stack_peaks([
+        (name, strength_model, strength_clip, ratios)
+        for _f, _m, _s, strength_model, strength_clip, ratios, _src, name in targets
+    ], ceiling)
     current_sd.forge_objects.unet = working_unet
     current_sd.forge_objects.clip = working_clip
     current_sd.forge_objects_after_applying_lora = current_sd.forge_objects.shallow_copy()

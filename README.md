@@ -64,6 +64,14 @@ Both 12-value legacy lists and 13-value extended lists are accepted. Use either 
 
 Malformed lists, non-finite values, and unknown roles produce an error instead of silently falling back to another profile.
 
+### Effective Weight
+
+A `role=` preset multiplies the strength written in the prompt, so the two are not the same number. `role=char` at `0.9` used to apply as `1.03` on some blocks, past anything the LoRA was trained at, which is what let a character LoRA impose its dataset's habitual posing over the prompt.
+
+Effective weight is now capped at 1.0, so the number in the prompt is the number applied. Turn off **Cap effective LoRA block weight at 1.0** in Settings → Extra Networks to reproduce images made before this change.
+
+The generation metadata records what actually ran, for example `LoRA effective peak: char:1.00@IN04`.
+
 ### Batch Restriction
 
 Every prompt in one processing batch must use the same LoRA names, strengths, and roles. Run prompts with different LoRA stacks as separate jobs. This prevents later prompts from silently using the first prompt's LoRA configuration.

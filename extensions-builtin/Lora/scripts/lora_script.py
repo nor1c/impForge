@@ -42,6 +42,7 @@ shared.options_templates.update(shared.options_section(('extra_networks', "Extra
     "lora_in_memory_limit": shared.OptionInfo(0, "Number of Lora networks to keep cached in memory", gr.Number, {"precision": 0}),
     "lora_not_found_warning_console": shared.OptionInfo(False, "Lora not found warning in console"),
     "lora_not_found_gradio_warning": shared.OptionInfo(False, "Lora not found warning popup in webui"),
+    "lora_clamp_effective_weight": shared.OptionInfo(True, "Cap effective LoRA block weight at 1.0").info("role= presets multiply the strength written in the prompt, so 0.9 could apply as 1.03; capping keeps the prompt number honest and stops the LoRA imposing its dataset's posing. Disable to reproduce images made before this was added"),
 }))
 
 
